@@ -54,6 +54,17 @@ async def _get_or_create_user(session, telegram_user) -> User:
     return user
 
 
+async def _get_user_locations(session, user_id: int) -> list[Location]:
+    """
+    به‌جای user.locations (که lazy loading رو در SQLAlchemy async پشتیبانی
+    نمی‌کنه و باعث کرش خاموش هندلر میشه)، مستقیم کوئری می‌زنیم.
+    """
+    result = await session.execute(
+        select(Location).where(Location.user_id == user_id)
+    )
+    return list(result.scalars().all())
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_session() as session:
         await _get_or_create_user(session, update.effective_user)
@@ -78,7 +89,7 @@ async def add_location_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     async with get_session() as session:
         user = await _get_or_create_user(session, update.effective_user)
-        count = len(user.locations)
+        count = len(await _get_user_locations(session, user.id))
 
     if count >= config.MAX_LOCATIONS_PER_USER:
         await query.edit_message_text(
@@ -196,7 +207,7 @@ async def confirm_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with get_session() as session:
         user = await _get_or_create_user(session, update.effective_user)
-        if len(user.locations) >= config.MAX_LOCATIONS_PER_USER:
+        if len(await _get_user_locations(session, user.id)) >= config.MAX_LOCATIONS_PER_USER:
             await query.edit_message_text(
                 f"شما در حال حاضر {config.MAX_LOCATIONS_PER_USER} مکان ثبت کردید.",
                 reply_markup=main_menu_keyboard(),
@@ -240,7 +251,7 @@ async def my_locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with get_session() as session:
         user = await _get_or_create_user(session, update.effective_user)
-        locations = user.locations
+        locations = await _get_user_locations(session, user.id)
 
     if not locations:
         await query.edit_message_text(
