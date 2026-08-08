@@ -51,12 +51,21 @@ def main_menu_keyboard(nightly_summary_enabled: bool = True) -> InlineKeyboardMa
     )
 
 
+def back_to_locations_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("بازگشت به مکان‌های من", callback_data="my_locations")]]
+    )
+
+
 def location_list_keyboard(locations) -> InlineKeyboardMarkup:
     rows = []
     for loc in locations:
         label = f"{loc.city_fa} - {loc.district_fa}"
         rows.append(
-            [InlineKeyboardButton(f"حذف: {label}", callback_data=f"delete_loc:{loc.id}")]
+            [InlineKeyboardButton(f"⚡ الان وضعیت قطعی: {label}", callback_data=f"check_now:{loc.id}")]
+        )
+        rows.append(
+            [InlineKeyboardButton(f"🗑 حذف: {label}", callback_data=f"delete_loc:{loc.id}")]
         )
     rows.append([InlineKeyboardButton("بازگشت به منو", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(rows)
