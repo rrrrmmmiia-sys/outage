@@ -21,6 +21,10 @@ MAX_LOCATIONS_PER_USER = int(os.getenv("MAX_LOCATIONS_PER_USER", "3"))
 
 NOTIFY_MINUTES_BEFORE = int(os.getenv("NOTIFY_MINUTES_BEFORE", "10"))
 
+# باید بعد از ساعتی باشه که هرمس ایجنت کارش رو تموم می‌کنه (هرمس ساعت ۲۲:۰۰ اجرا میشه)
+NIGHTLY_SUMMARY_HOUR = int(os.getenv("NIGHTLY_SUMMARY_HOUR", "22"))
+NIGHTLY_SUMMARY_MINUTE = int(os.getenv("NIGHTLY_SUMMARY_MINUTE", "15"))
+
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده. فایل .env رو چک کن.")
 
