@@ -1,4 +1,6 @@
+import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from telegram import Update
@@ -14,6 +16,7 @@ from telegram.ext import (
 import config
 from bot.keyboards import (
     MAZANDARAN_CODE,
+    back_to_locations_keyboard,
     confirm_keyboard,
     counties_keyboard,
     location_list_keyboard,
@@ -23,9 +26,11 @@ from bot.keyboards import (
 from data.iran_divisions import PROVINCES
 from db.database import get_session
 from db.models import Location, User
-from services.outage_service import build_region_key, find_similar_locations
+from services.outage_service import build_region_key, find_similar_locations, get_cached_outage
 
 logger = logging.getLogger(__name__)
+
+TZ = ZoneInfo(config.TIMEZONE)
 
 CHOOSING_COUNTY, TYPING_DISTRICT, CHOOSING_MATCH, CONFIRMING = range(4)
 
@@ -291,6 +296,51 @@ async def my_locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def check_now_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    loc_id = int(query.data.split(":", 1)[1])
+
+    async with get_session() as session:
+        location = await session.get(Location, loc_id)
+        if not location:
+            await query.edit_message_text(
+                "این مکان دیگه پیدا نشد (شاید حذف شده).",
+                reply_markup=back_to_locations_keyboard(),
+            )
+            return
+
+        today = dt.datetime.now(TZ).date()
+        cache = await get_cached_outage(session, location.region_key, today)
+
+    label = f"{location.city_fa} - {location.district_fa}"
+
+    if cache is None:
+        text = (
+            f"⚡ وضعیت الان برای {label}:\n\n"
+            "هنوز هیچ اطلاعاتی برای امروز تو دیتابیس ثبت نشده "
+            "(یا هرمس هنوز این منطقه رو برای امروز چک نکرده)."
+        )
+    elif not cache.found or not cache.start_time:
+        text = (
+            f"⚡ وضعیت الان برای {label}:\n\n"
+            "طبق آخرین چک، قطعی برنامه‌ریزی‌شده‌ای برای امروز پیدا نشده."
+        )
+    else:
+        time_range = cache.start_time.strftime("%H:%M")
+        if cache.end_time:
+            time_range += f" تا {cache.end_time.strftime('%H:%M')}"
+        note = f"\n({cache.note})" if cache.note else ""
+        updated = cache.updated_at.strftime("%H:%M") if cache.updated_at else "-"
+        text = (
+            f"⚡ وضعیت الان برای {label}:\n\n"
+            f"قطعی امروز: {time_range}{note}\n\n"
+            f"آخرین بروزرسانی این اطلاعات: {updated}"
+        )
+
+    await query.edit_message_text(text, reply_markup=back_to_locations_keyboard())
+
+
 async def delete_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -336,5 +386,6 @@ def register_handlers(app):
     app.add_handler(build_conversation_handler())
     app.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_to_menu$"))
     app.add_handler(CallbackQueryHandler(my_locations, pattern="^my_locations$"))
+    app.add_handler(CallbackQueryHandler(check_now_status, pattern="^check_now:"))
     app.add_handler(CallbackQueryHandler(delete_location, pattern="^delete_loc:"))
     app.add_handler(CallbackQueryHandler(toggle_nightly_summary, pattern="^toggle_nightly$"))
