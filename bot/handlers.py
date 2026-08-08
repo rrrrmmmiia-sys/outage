@@ -27,7 +27,7 @@ from services.outage_service import build_region_key, find_similar_locations
 
 logger = logging.getLogger(__name__)
 
-CHOOSING_COUNTY, TYPING_CITY, TYPING_DISTRICT, CHOOSING_MATCH, CONFIRMING = range(5)
+CHOOSING_COUNTY, TYPING_DISTRICT, CHOOSING_MATCH, CONFIRMING = range(4)
 
 PROVINCE_FA = PROVINCES[MAZANDARAN_CODE]["fa"]
 
@@ -35,8 +35,7 @@ PROVINCE_FA = PROVINCES[MAZANDARAN_CODE]["fa"]
 def _confirm_text(loc: dict) -> str:
     return (
         f"استان: {loc['province_fa']}\n"
-        f"شهرستان: {loc['county_fa']}\n"
-        f"شهر/روستا: {loc['city_fa']}\n"
+        f"شهر: {loc['city_fa']}\n"
         f"منطقه: {loc['district_fa']}\n\n"
         "این اطلاعات درسته؟"
     )
@@ -67,20 +66,45 @@ async def _get_user_locations(session, user_id: int) -> list[Location]:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_session() as session:
-        await _get_or_create_user(session, update.effective_user)
+        user = await _get_or_create_user(session, update.effective_user)
+        nightly = user.nightly_summary_enabled
 
     await update.message.reply_text(
         f"سلام! این ربات فقط برای استان {PROVINCE_FA} فعاله.\n"
         f"می‌تونی تا {config.MAX_LOCATIONS_PER_USER} مکان ثبت کنی تا هر روز ساعت قطعی برقش رو بهت بگم "
         "و ۱۰ دقیقه قبل از شروع قطعی هشدار بدم.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(nightly),
     )
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_keyboard())
+
+    async with get_session() as session:
+        user = await _get_or_create_user(session, update.effective_user)
+        nightly = user.nightly_summary_enabled
+
+    await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_keyboard(nightly))
+
+
+async def toggle_nightly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    async with get_session() as session:
+        user = await _get_or_create_user(session, update.effective_user)
+        user.nightly_summary_enabled = not user.nightly_summary_enabled
+        await session.commit()
+        nightly = user.nightly_summary_enabled
+
+    status_text = "روشن شد ✅" if nightly else "خاموش شد ❌"
+    await query.edit_message_text(
+        f"خلاصه‌ی شبانه {status_text}\n\n"
+        "(این خلاصه هر شب ساعت ۲۲ به شما می‌گه فردا برق منطقه‌هاتون ساعت چند قطع میشه؛ "
+        "هشدار ۱۰ دقیقه‌ی قبل از قطعی مستقل از این تنظیمه و همیشه فعاله)",
+        reply_markup=main_menu_keyboard(nightly),
+    )
 
 
 async def add_location_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,12 +114,13 @@ async def add_location_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with get_session() as session:
         user = await _get_or_create_user(session, update.effective_user)
         count = len(await _get_user_locations(session, user.id))
+        nightly = user.nightly_summary_enabled
 
     if count >= config.MAX_LOCATIONS_PER_USER:
         await query.edit_message_text(
             f"شما در حال حاضر {config.MAX_LOCATIONS_PER_USER} مکان ثبت کردید. "
             "برای افزودن مکان جدید، اول یکی از مکان‌های قبلی رو حذف کن.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(nightly),
         )
         return ConversationHandler.END
 
@@ -104,8 +129,7 @@ async def add_location_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "province_fa": PROVINCE_FA,
     }
     await query.edit_message_text(
-        f"استان {PROVINCE_FA} انتخاب شد. حالا شهرستان رو انتخاب کن:",
-        reply_markup=counties_keyboard(),
+        "شهر خودت رو انتخاب کن:", reply_markup=counties_keyboard()
     )
     return CHOOSING_COUNTY
 
@@ -114,23 +138,16 @@ async def county_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     county_code = query.data.split(":", 1)[1]
-    county_fa = PROVINCES[MAZANDARAN_CODE]["counties"][county_code]
+    city_fa = PROVINCES[MAZANDARAN_CODE]["counties"][county_code]
 
+    # چون دیگه مرحله‌ی جدای «تایپ شهر» نداریم، شهر انتخاب‌شده مستقیم city ثبت میشه
     context.user_data["new_location"]["county_code"] = county_code
-    context.user_data["new_location"]["county_fa"] = county_fa
+    context.user_data["new_location"]["county_fa"] = city_fa
+    context.user_data["new_location"]["city_fa"] = city_fa
 
-    await query.edit_message_text("اسم شهر یا روستا رو تایپ کن:")
-    return TYPING_CITY
-
-
-async def city_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    city = update.message.text.strip()
-    if len(city) < 2:
-        await update.message.reply_text("اسم شهر/روستا خیلی کوتاهه، دوباره بفرست:")
-        return TYPING_CITY
-
-    context.user_data["new_location"]["city_fa"] = city
-    await update.message.reply_text("اسم منطقه یا محله رو تایپ کن:")
+    await query.edit_message_text(
+        "به منظور نتیجه‌ی بهتر برای شما، فقط یک کلمه کلیدی از منطقه‌ی خود را تایپ کنید:"
+    )
     return TYPING_DISTRICT
 
 
@@ -151,9 +168,8 @@ async def district_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if matches:
         context.user_data["match_candidates"] = matches
         await update.message.reply_text(
-            "مکان‌های مشابهی تو دیتابیس پیدا شد. اگه یکیشون دقیقاً مکان خودته "
-            "انتخابش کن (این‌جوری دیگه لازم نیست دوباره براش سرچ بشه)، "
-            "وگرنه بزن «هیچکدوم»:",
+            "چند تا منطقه‌ی مشابه با همین کلمه تو دیتابیس پیدا شد. "
+            "اگه یکیشون دقیقاً مکان خودته انتخابش کن، وگرنه بزن «هیچکدوم»:",
             reply_markup=matches_keyboard(matches),
         )
         return CHOOSING_MATCH
@@ -210,7 +226,7 @@ async def confirm_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(await _get_user_locations(session, user.id)) >= config.MAX_LOCATIONS_PER_USER:
             await query.edit_message_text(
                 f"شما در حال حاضر {config.MAX_LOCATIONS_PER_USER} مکان ثبت کردید.",
-                reply_markup=main_menu_keyboard(),
+                reply_markup=main_menu_keyboard(user.nightly_summary_enabled),
             )
             return ConversationHandler.END
 
@@ -226,12 +242,13 @@ async def confirm_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         session.add(new_loc)
         await session.commit()
+        nightly = user.nightly_summary_enabled
 
     context.user_data.pop("new_location", None)
     context.user_data.pop("match_candidates", None)
     await query.edit_message_text(
         "مکان با موفقیت ثبت شد. از امشب ساعت ۲۲:۰۰ ساعت قطعی فردا برات چک میشه.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(nightly),
     )
     return ConversationHandler.END
 
@@ -241,7 +258,12 @@ async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data.pop("new_location", None)
     context.user_data.pop("match_candidates", None)
-    await query.edit_message_text("لغو شد.", reply_markup=main_menu_keyboard())
+
+    async with get_session() as session:
+        user = await _get_or_create_user(session, update.effective_user)
+        nightly = user.nightly_summary_enabled
+
+    await query.edit_message_text("لغو شد.", reply_markup=main_menu_keyboard(nightly))
     return ConversationHandler.END
 
 
@@ -252,16 +274,17 @@ async def my_locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_session() as session:
         user = await _get_or_create_user(session, update.effective_user)
         locations = await _get_user_locations(session, user.id)
+        nightly = user.nightly_summary_enabled
 
     if not locations:
         await query.edit_message_text(
-            "هنوز مکانی ثبت نکردی.", reply_markup=main_menu_keyboard()
+            "هنوز مکانی ثبت نکردی.", reply_markup=main_menu_keyboard(nightly)
         )
         return
 
     lines = ["مکان‌های ثبت‌شده‌ی شما:\n"]
     for loc in locations:
-        lines.append(f"- {loc.county_fa} / {loc.city_fa} / {loc.district_fa}")
+        lines.append(f"- {loc.city_fa} / {loc.district_fa}")
 
     await query.edit_message_text(
         "\n".join(lines), reply_markup=location_list_keyboard(locations)
@@ -278,8 +301,10 @@ async def delete_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if location:
             await session.delete(location)
             await session.commit()
+        user = await _get_or_create_user(session, update.effective_user)
+        nightly = user.nightly_summary_enabled
 
-    await query.edit_message_text("مکان حذف شد.", reply_markup=main_menu_keyboard())
+    await query.edit_message_text("مکان حذف شد.", reply_markup=main_menu_keyboard(nightly))
 
 
 def build_conversation_handler() -> ConversationHandler:
@@ -288,9 +313,6 @@ def build_conversation_handler() -> ConversationHandler:
         states={
             CHOOSING_COUNTY: [
                 CallbackQueryHandler(county_chosen, pattern="^county:"),
-            ],
-            TYPING_CITY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, city_typed),
             ],
             TYPING_DISTRICT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, district_typed),
@@ -315,3 +337,4 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_to_menu$"))
     app.add_handler(CallbackQueryHandler(my_locations, pattern="^my_locations$"))
     app.add_handler(CallbackQueryHandler(delete_location, pattern="^delete_loc:"))
+    app.add_handler(CallbackQueryHandler(toggle_nightly_summary, pattern="^toggle_nightly$"))
