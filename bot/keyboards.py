@@ -36,11 +36,17 @@ def matches_keyboard(candidates: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(nightly_summary_enabled: bool = True) -> InlineKeyboardMarkup:
+    toggle_label = (
+        "🔕 خاموش‌کردن خلاصه‌ی شبانه"
+        if nightly_summary_enabled
+        else "🔔 روشن‌کردن خلاصه‌ی شبانه"
+    )
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("افزودن مکان جدید", callback_data="add_location")],
             [InlineKeyboardButton("مکان‌های من", callback_data="my_locations")],
+            [InlineKeyboardButton(toggle_label, callback_data="toggle_nightly")],
         ]
     )
 
