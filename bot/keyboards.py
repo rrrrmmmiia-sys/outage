@@ -30,8 +30,7 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 def matches_keyboard(candidates: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for i, c in enumerate(candidates):
-        label = f"{c['city_fa']} - {c['district_fa']}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"pick_match:{i}")])
+        rows.append([InlineKeyboardButton(c["label"], callback_data=f"pick_match:{i}")])
     rows.append([InlineKeyboardButton("هیچکدوم، مورد جدیده", callback_data="use_new")])
     return InlineKeyboardMarkup(rows)
 
