@@ -76,3 +76,56 @@ async def find_similar_locations(
         },
     )
     return [dict(row) for row in result.mappings().all()]
+
+
+_OUTAGE_WORD_SIMILARITY_THRESHOLD = 0.3
+
+# word_similarity بهترین تطابق یه کلمه‌ی کوتاه رو داخل یه متن بلندتر پیدا می‌کنه؛
+# دقیقاً همون چیزی که لازم داریم چون کلمه‌ی کاربر کوتاهه ولی note آدرس کامل و بلنده.
+# translate هم کاراکترهای عربی (ي، ك) رو به معادل فارسی‌شون (ی، ک) یکسان می‌کنه،
+# چون داده‌ی خام هرمس این دو رسم‌الخط رو قاطی داره.
+_SIMILAR_OUTAGES_QUERY = sql_text(
+    """
+    SELECT region_key, note, start_time, end_time, score FROM (
+        SELECT region_key, note, start_time, end_time,
+               word_similarity(
+                   translate(:keyword, 'يك', 'یک'),
+                   translate(note, 'يك', 'یک')
+               ) AS score
+        FROM outage_cache
+        WHERE region_key LIKE :prefix
+          AND date = :date
+          AND found = TRUE
+          AND note IS NOT NULL
+    ) sub
+    WHERE score > :threshold
+    ORDER BY score DESC
+    LIMIT :limit
+    """
+)
+
+
+async def find_similar_outage_entries(
+    session: AsyncSession,
+    county_code: str,
+    date: dt.date,
+    keyword: str,
+    limit: int = 5,
+) -> list[dict]:
+    """
+    داخل داده‌ی خامی که هرمس همون روز نوشته (outage_cache) دنبال آدرس‌های
+    مشابه کلمه‌ی کلیدی کاربر می‌گرده. برای وقتیه که هرمس به‌جای سرچ مناطق
+    ثبت‌شده، کل لیست قطعی شهر رو یک‌جا ریخته تو دیتابیس.
+    """
+    prefix = f"mazandaran|{county_code}|%"
+    result = await session.execute(
+        _SIMILAR_OUTAGES_QUERY,
+        {
+            "prefix": prefix,
+            "date": date,
+            "keyword": keyword,
+            "threshold": _OUTAGE_WORD_SIMILARITY_THRESHOLD,
+            "limit": limit,
+        },
+    )
+    return [dict(row) for row in result.mappings().all()]
