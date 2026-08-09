@@ -81,7 +81,15 @@ class OutageCache(Base):
     """
 
     __tablename__ = "outage_cache"
-    __table_args__ = (UniqueConstraint("region_key", "date", name="uq_region_date"),)
+    __table_args__ = (
+        UniqueConstraint("region_key", "date", name="uq_region_date"),
+        Index(
+            "ix_outage_cache_note_trgm",
+            "note",
+            postgresql_using="gin",
+            postgresql_ops={"note": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     region_key: Mapped[str] = mapped_column(String(512), index=True)
