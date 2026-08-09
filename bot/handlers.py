@@ -26,7 +26,12 @@ from bot.keyboards import (
 from data.iran_divisions import PROVINCES
 from db.database import get_session
 from db.models import Location, User
-from services.outage_service import build_region_key, find_similar_locations, get_cached_outage
+from services.outage_service import (
+    build_region_key,
+    find_similar_locations,
+    find_similar_outage_entries,
+    get_cached_outage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,18 +169,53 @@ async def district_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loc = context.user_data["new_location"]
     loc["district_fa"] = district
+    today = dt.datetime.now(TZ).date()
 
     async with get_session() as session:
-        matches = await find_similar_locations(
+        loc_matches = await find_similar_locations(
             session, loc["county_code"], loc["city_fa"], district
         )
+        outage_matches = await find_similar_outage_entries(
+            session, loc["county_code"], today, district
+        )
 
-    if matches:
-        context.user_data["match_candidates"] = matches
+    candidates = []
+    for m in loc_matches:
+        candidates.append(
+            {
+                "region_key": m["region_key"],
+                "city_fa": m["city_fa"],
+                "district_fa": m["district_fa"],
+                "label": f"📌 {m['city_fa']} - {m['district_fa']}",
+            }
+        )
+    for m in outage_matches:
+        note = (m["note"] or "").strip()
+        short_label = note[:55] + ("…" if len(note) > 55 else "")
+        candidates.append(
+            {
+                "region_key": m["region_key"],
+                "city_fa": loc["city_fa"],
+                "district_fa": note[:255] if note else district,
+                "label": f"⚡ {short_label}",
+            }
+        )
+
+    # حذف موارد تکراری بر اساس region_key (اگه یه مورد از هر دو منبع اومده باشه)
+    seen_keys = set()
+    deduped = []
+    for c in candidates:
+        if c["region_key"] not in seen_keys:
+            seen_keys.add(c["region_key"])
+            deduped.append(c)
+
+    if deduped:
+        context.user_data["match_candidates"] = deduped
         await update.message.reply_text(
-            "چند تا منطقه‌ی مشابه با همین کلمه تو دیتابیس پیدا شد. "
+            "چند تا منطقه‌ی مشابه با همین کلمه پیدا شد "
+            "(هم از مکان‌های ثبت‌شده‌ی قبلی، هم از لیست قطعی امروز). "
             "اگه یکیشون دقیقاً مکان خودته انتخابش کن، وگرنه بزن «هیچکدوم»:",
-            reply_markup=matches_keyboard(matches),
+            reply_markup=matches_keyboard(deduped),
         )
         return CHOOSING_MATCH
 
