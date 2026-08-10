@@ -218,48 +218,25 @@ def get_pg_connection():
 
 
 def upsert_rows(conn, rows: list[tuple]) -> dict:
-    """
-    درج یا آپدیت ردیف‌ها در outage_cache.
-
-    UNIQUE KEY:
-        (region_key, date)
-
-    اگر سایت برای یک منطقه در یک روز چند کارت مشابه
-    برگرداند، فقط آخرین کارت نگه داشته می‌شود.
-    """
     if not rows:
-        return {"inserted_or_updated": 0, "duplicates_removed": 0}
+        return {
+            "inserted_or_updated": 0,
+            "duplicates_removed": 0,
+        }
 
-    # ─────────────────────────────────────────────────────────
-    # حذف duplicateها قبل از ارسال به PostgreSQL
-    # ─────────────────────────────────────────────────────────
-
+    # حذف duplicateها
     unique_rows = {}
     duplicates_removed = 0
 
     for row in rows:
-        # row:
-        # 0 = region_key
-        # 1 = date
         key = (row[0], row[1])
 
         if key in unique_rows:
             duplicates_removed += 1
 
-        # آخرین رکورد برنده می‌شود
         unique_rows[key] = row
 
     rows = list(unique_rows.values())
-
-    if duplicates_removed:
-        print(
-            f"   ⚠️  {duplicates_removed} رکورد تکراری حذف شد "
-            f"(بر اساس region_key + date)"
-        )
-
-    # ─────────────────────────────────────────────────────────
-    # INSERT / UPSERT
-    # ─────────────────────────────────────────────────────────
 
     query = """
         INSERT INTO outage_cache (
@@ -272,7 +249,6 @@ def upsert_rows(conn, rows: list[tuple]) -> dict:
             updated_at
         )
         VALUES %s
-
         ON CONFLICT (region_key, date)
         DO UPDATE SET
             found = EXCLUDED.found,
@@ -297,6 +273,10 @@ def upsert_rows(conn, rows: list[tuple]) -> dict:
 
     try:
         with conn.cursor() as cur:
+            # 🔥 پاک کردن تمام اطلاعات قبلی
+            cur.execute("TRUNCATE TABLE outage_cache")
+
+            # درج دیتای جدید
             psycopg2.extras.execute_values(
                 cur,
                 query,
@@ -313,7 +293,7 @@ def upsert_rows(conn, rows: list[tuple]) -> dict:
         "inserted_or_updated": len(rows),
         "duplicates_removed": duplicates_removed,
     }
-
+   
 # ═══════════════════════════════════════════════════════════════
 #  اجرای اصلی
 # ═══════════════════════════════════════════════════════════════
