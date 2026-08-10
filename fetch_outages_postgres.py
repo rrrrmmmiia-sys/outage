@@ -219,15 +219,60 @@ def get_pg_connection():
 
 def upsert_rows(conn, rows: list[tuple]) -> dict:
     """
-    درج یا آپدیت ردیف‌ها تو outage_cache با همون قید یکتای
-    (region_key, date) که خود ربات (db/models.py) تعریف کرده.
+    درج یا آپدیت ردیف‌ها در outage_cache.
+
+    UNIQUE KEY:
+        (region_key, date)
+
+    اگر سایت برای یک منطقه در یک روز چند کارت مشابه
+    برگرداند، فقط آخرین کارت نگه داشته می‌شود.
     """
     if not rows:
-        return {"inserted_or_updated": 0}
+        return {"inserted_or_updated": 0, "duplicates_removed": 0}
+
+    # ─────────────────────────────────────────────────────────
+    # حذف duplicateها قبل از ارسال به PostgreSQL
+    # ─────────────────────────────────────────────────────────
+
+    unique_rows = {}
+    duplicates_removed = 0
+
+    for row in rows:
+        # row:
+        # 0 = region_key
+        # 1 = date
+        key = (row[0], row[1])
+
+        if key in unique_rows:
+            duplicates_removed += 1
+
+        # آخرین رکورد برنده می‌شود
+        unique_rows[key] = row
+
+    rows = list(unique_rows.values())
+
+    if duplicates_removed:
+        print(
+            f"   ⚠️  {duplicates_removed} رکورد تکراری حذف شد "
+            f"(بر اساس region_key + date)"
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # INSERT / UPSERT
+    # ─────────────────────────────────────────────────────────
 
     query = """
-        INSERT INTO outage_cache (region_key, date, found, start_time, end_time, note, updated_at)
+        INSERT INTO outage_cache (
+            region_key,
+            date,
+            found,
+            start_time,
+            end_time,
+            note,
+            updated_at
+        )
         VALUES %s
+
         ON CONFLICT (region_key, date)
         DO UPDATE SET
             found = EXCLUDED.found,
@@ -236,14 +281,38 @@ def upsert_rows(conn, rows: list[tuple]) -> dict:
             note = EXCLUDED.note,
             updated_at = NOW()
     """
-    rows_with_timestamp = [(r[0], r[1], r[2], r[3], r[4], r[5], dt.datetime.utcnow()) for r in rows]
 
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_values(cur, query, rows_with_timestamp)
-    conn.commit()
+    rows_with_timestamp = [
+        (
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            r[4],
+            r[5],
+            dt.datetime.now(dt.UTC),
+        )
+        for r in rows
+    ]
 
-    return {"inserted_or_updated": len(rows)}
+    try:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                query,
+                rows_with_timestamp
+            )
 
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {
+        "inserted_or_updated": len(rows),
+        "duplicates_removed": duplicates_removed,
+    }
 
 # ═══════════════════════════════════════════════════════════════
 #  اجرای اصلی
