@@ -4,7 +4,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy import text
 from db.models import OutageCache
 
 
@@ -61,24 +61,46 @@ async def find_similar_locations(
     limit: int = 1000,
 ) -> list[dict]:
     """
-    پیدا کردن مکان‌های مشابه ثبت‌شده قبلی.
+    جستجوی دقیق بر اساس وجود عبارت جستجو در نام منطقه.
 
-    limit عمداً بزرگ‌تر است تا pagination در لایه Telegram
-    انجام شود و کاربر بتواند تمام نتایج را با صفحه‌بندی ببیند.
+    مثال:
+        "امام" -> "خیابان امام خمینی" ✅
+        "امام" -> "امامزاده عبدالله" ✅
+        "امام" -> "خیابان مدرس" ❌
+
+    فقط مکان‌هایی که واقعاً در جدول locations وجود دارند
+    برگردانده می‌شوند.
     """
+
+    keyword = district_fa.strip()
+
+    if not keyword:
+        return []
+
     result = await session.execute(
-        _SIMILAR_LOCATIONS_QUERY,
+        text(
+            """
+            SELECT
+                region_key,
+                city_fa,
+                district_fa
+            FROM locations
+            WHERE county_code = :county_code
+              AND city_fa = :city_fa
+              AND district_fa ILIKE '%' || :keyword || '%'
+            ORDER BY district_fa
+            LIMIT :limit
+            """
+        ),
         {
             "county_code": county_code,
             "city_fa": city_fa,
-            "district_fa": district_fa,
-            "threshold": _SIMILARITY_THRESHOLD,
+            "keyword": keyword,
             "limit": limit,
         },
     )
 
     return [dict(row) for row in result.mappings().all()]
-
 _OUTAGE_WORD_SIMILARITY_THRESHOLD = 0.3
 
 # word_similarity بهترین تطابق یه کلمه‌ی کوتاه رو داخل یه متن بلندتر پیدا می‌کنه؛
@@ -114,19 +136,39 @@ async def find_similar_outage_entries(
     limit: int = 1000,
 ) -> list[dict]:
     """
-    پیدا کردن مناطق مشابه داخل outage_cache برای امروز.
+    جستجوی قطعی‌های امروز بر اساس وجود واقعی عبارت
+    در note / district.
 
-    نتایج برای pagination به handler برگردانده می‌شوند.
+    هیچ fuzzy matching استفاده نمی‌شود.
     """
+
+    keyword = keyword.strip()
+
+    if not keyword:
+        return []
+
     prefix = f"mazandaran|{county_code}|%"
 
     result = await session.execute(
-        _SIMILAR_OUTAGES_QUERY,
+        text(
+            """
+            SELECT
+                region_key,
+                note,
+                start_time,
+                end_time
+            FROM outage_cache
+            WHERE region_key LIKE :prefix
+              AND date = :date
+              AND note ILIKE '%' || :keyword || '%'
+            ORDER BY start_time
+            LIMIT :limit
+            """
+        ),
         {
             "prefix": prefix,
             "date": date,
             "keyword": keyword,
-            "threshold": _OUTAGE_WORD_SIMILARITY_THRESHOLD,
             "limit": limit,
         },
     )
