@@ -318,9 +318,18 @@ async def district_typed(
             limit=1000,
         )
 
+        # region_key مکان‌هایی که الان واقعاً در locations هستند
+        active_region_keys = {
+            item["region_key"]
+            for item in loc_matches
+        }
+
     candidates = []
 
-    # نتایج مکان‌های قبلی
+    # -----------------------------------------
+    # 1. مکان‌های ثبت‌شده فعلی
+    # -----------------------------------------
+
     for m in loc_matches:
         candidates.append(
             {
@@ -334,24 +343,35 @@ async def district_typed(
             }
         )
 
-    # نتایج outage_cache
+    # -----------------------------------------
+    # 2. نتایج outage_cache
+    # -----------------------------------------
+
     for m in outage_matches:
+        region_key = m["region_key"]
         note = (m["note"] or "").strip()
+
+        # اگر این region_key در locations فعلی وجود دارد،
+        # قبلاً به candidates اضافه شده و دوباره اضافه نشود.
+        if region_key in active_region_keys:
+            continue
+
+        if not note:
+            continue
 
         candidates.append(
             {
-                "region_key": m["region_key"],
+                "region_key": region_key,
                 "city_fa": loc["city_fa"],
-                "district_fa": note[:255] if note else district,
-                "label": (
-                    f"⚡ {note}"
-                    if note
-                    else f"⚡ {district}"
-                ),
+                "district_fa": note[:255],
+                "label": f"⚡ {note}",
             }
         )
 
-    # حذف duplicateها بر اساس region_key
+    # -----------------------------------------
+    # حذف duplicate
+    # -----------------------------------------
+
     seen_keys = set()
     deduped = []
 
@@ -364,29 +384,31 @@ async def district_typed(
         seen_keys.add(region_key)
         deduped.append(candidate)
 
-    if deduped:
-        # ذخیره کل نتایج
-        context.user_data["match_candidates"] = deduped
+    candidates = deduped
 
-        # شروع از صفحه اول
+    # -----------------------------------------
+    # نمایش نتایج
+    # -----------------------------------------
+
+    if candidates:
+        context.user_data["match_candidates"] = candidates
         context.user_data["match_page"] = 0
 
-        page = 0
-
         await update.message.reply_text(
-            _matches_text(deduped, page),
-            reply_markup=_matches_keyboard(deduped, page),
+            _matches_text(candidates, 0),
+            reply_markup=_matches_keyboard(candidates, 0),
         )
 
         return CHOOSING_MATCH
 
+    # هیچ نتیجه‌ای پیدا نشد
     await update.message.reply_text(
         _confirm_text(loc),
         reply_markup=confirm_keyboard(),
     )
 
     return CONFIRMING
-
+    
 async def matches_page(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
