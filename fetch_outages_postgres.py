@@ -101,9 +101,12 @@ def build_region_key(county_code: str, city_fa: str, district_fa: str) -> str:
 
 def fetch_page(url: str) -> str:
     print(f"🌐 در حال دانلود {url} ...")
+    # هدرهای HTTP باید ASCII باشن (استاندارد latin-1)، برای همین توضیح فارسی
+    # اینجا نیست؛ توضیح کامل همین‌جا به‌عنوان کامنته: این ربات هشدار قطعی
+    # برق مازندرانه و با اجازه‌ی مدیر سایت baboliha.ir این درخواست رو می‌زنه.
     req = urllib.request.Request(url, headers={
         "Accept-Language": "fa-IR,fa;q=0.9",
-        "User-Agent": "tele-bragh-outage-bot/1.0 (ربات هشدار قطعی برق مازندران؛ با اجازه‌ی مدیر سایت)",
+        "User-Agent": "tele-bragh-outage-bot/1.0 (+mazandaran power outage alert bot; used with site owner permission)",
     })
     with urllib.request.urlopen(req, timeout=30) as resp:
         html = resp.read().decode("utf-8")
