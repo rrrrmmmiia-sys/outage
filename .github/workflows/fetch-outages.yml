@@ -1,0 +1,27 @@
+name: Fetch Mazandaran Outages
+
+on:
+  schedule:
+    # هر روز ساعت ۲۱:۰۰ UTC = ۰۰:۳۰ به وقت تهران (ایران DST نداره، همیشه UTC+3:30)
+    - cron: "0 21 * * *"
+  workflow_dispatch: {}  # اجازه‌ی اجرای دستی از تب Actions گیت‌هاب، برای تست
+
+jobs:
+  fetch-and-store:
+    runs-on: ubuntu-latest
+    steps:
+      - name: چک‌اوت کد ریپازیتوری
+        uses: actions/checkout@v4
+
+      - name: نصب پایتون
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: نصب وابستگی‌ها
+        run: pip install psycopg2-binary
+
+      - name: اجرای اسکریپت دریافت و ذخیره‌ی قطعی‌ها
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python fetch_outages_postgres.py
