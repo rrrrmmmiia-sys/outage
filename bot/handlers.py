@@ -14,6 +14,8 @@ from telegram.ext import (
 )
 
 import config
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from bot.keyboards import (
     MAZANDARAN_CODE,
     back_to_locations_keyboard,
@@ -21,7 +23,6 @@ from bot.keyboards import (
     counties_keyboard,
     location_list_keyboard,
     main_menu_keyboard,
-    matches_keyboard,
 )
 from data.iran_divisions import PROVINCES
 from db.database import get_session
@@ -49,7 +50,129 @@ def _confirm_text(loc: dict) -> str:
         f"منطقه: {loc['district_fa']}\n\n"
         "این اطلاعات درسته؟"
     )
+MATCHES_PER_PAGE = 5
 
+
+def _matches_text(
+    candidates: list[dict],
+    page: int,
+) -> str:
+    """
+    متن نتایج صفحه فعلی.
+    نام کامل منطقه اینجا نمایش داده می‌شود تا مشکل ... روی
+    دکمه‌های Telegram نداشته باشیم.
+    """
+    total = len(candidates)
+
+    if total == 0:
+        return "هیچ منطقه مشابهی پیدا نشد."
+
+    total_pages = (total + MATCHES_PER_PAGE - 1) // MATCHES_PER_PAGE
+
+    start = page * MATCHES_PER_PAGE
+    end = min(start + MATCHES_PER_PAGE, total)
+
+    current = candidates[start:end]
+
+    lines = [
+        "📍 مناطق مشابه پیدا شد:\n",
+        f"صفحه {page + 1} از {total_pages}\n",
+    ]
+
+    for i, candidate in enumerate(current, start=1):
+        lines.append(
+            f"{i}️⃣ {candidate['city_fa']} - "
+            f"{candidate['district_fa']}"
+        )
+
+    lines.append(
+        "\nبرای انتخاب، روی شماره منطقه بزن."
+    )
+
+    return "\n".join(lines)
+
+
+def _matches_keyboard(
+    candidates: list[dict],
+    page: int,
+) -> InlineKeyboardMarkup:
+    """
+    Keyboard صفحه نتایج.
+    دکمه‌ها فقط شماره هستند تا Telegram متن منطقه را با ... قطع نکند.
+    """
+    total = len(candidates)
+
+    start = page * MATCHES_PER_PAGE
+    end = min(start + MATCHES_PER_PAGE, total)
+
+    current = candidates[start:end]
+
+    keyboard = []
+
+    # دکمه‌های انتخاب
+    row = []
+
+    for local_idx, _candidate in enumerate(current):
+        absolute_idx = start + local_idx
+
+        row.append(
+            InlineKeyboardButton(
+                text=f"{local_idx + 1}️⃣",
+                callback_data=f"pick_match:{absolute_idx}",
+            )
+        )
+
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    # صفحه‌بندی
+    total_pages = max(
+        1,
+        (total + MATCHES_PER_PAGE - 1) // MATCHES_PER_PAGE
+    )
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="◀️ قبلی",
+                callback_data=f"match_page:{page - 1}",
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="match_page:noop",
+        )
+    )
+
+    if page < total_pages - 1:
+        navigation.append(
+            InlineKeyboardButton(
+                text="بعدی ▶️",
+                callback_data=f"match_page:{page + 1}",
+            )
+        )
+
+    keyboard.append(navigation)
+
+    # هیچکدام
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="❌ هیچکدام",
+                callback_data="use_new",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(keyboard)
 
 async def _get_or_create_user(session, telegram_user) -> User:
     user = await session.scalar(
@@ -161,88 +284,195 @@ async def county_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return TYPING_DISTRICT
 
 
-async def district_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def district_typed(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     district = update.message.text.strip()
+
     if len(district) < 2:
-        await update.message.reply_text("اسم منطقه خیلی کوتاهه، دوباره بفرست:")
+        await update.message.reply_text(
+            "اسم منطقه خیلی کوتاهه، دوباره بفرست:"
+        )
         return TYPING_DISTRICT
 
     loc = context.user_data["new_location"]
     loc["district_fa"] = district
+
     today = dt.datetime.now(TZ).date()
 
     async with get_session() as session:
         loc_matches = await find_similar_locations(
-            session, loc["county_code"], loc["city_fa"], district
+            session,
+            loc["county_code"],
+            loc["city_fa"],
+            district,
+            limit=1000,
         )
+
         outage_matches = await find_similar_outage_entries(
-            session, loc["county_code"], today, district
+            session,
+            loc["county_code"],
+            today,
+            district,
+            limit=1000,
         )
 
     candidates = []
+
+    # نتایج مکان‌های قبلی
     for m in loc_matches:
         candidates.append(
             {
                 "region_key": m["region_key"],
                 "city_fa": m["city_fa"],
                 "district_fa": m["district_fa"],
-                "label": f"📌 {m['city_fa']} - {m['district_fa']}",
+                "label": (
+                    f"📌 {m['city_fa']} - "
+                    f"{m['district_fa']}"
+                ),
             }
         )
+
+    # نتایج outage_cache
     for m in outage_matches:
         note = (m["note"] or "").strip()
-        short_label = note[:55] + ("…" if len(note) > 55 else "")
+
         candidates.append(
             {
                 "region_key": m["region_key"],
                 "city_fa": loc["city_fa"],
                 "district_fa": note[:255] if note else district,
-                "label": f"⚡ {short_label}",
+                "label": (
+                    f"⚡ {note}"
+                    if note
+                    else f"⚡ {district}"
+                ),
             }
         )
 
-    # حذف موارد تکراری بر اساس region_key (اگه یه مورد از هر دو منبع اومده باشه)
+    # حذف duplicateها بر اساس region_key
     seen_keys = set()
     deduped = []
-    for c in candidates:
-        if c["region_key"] not in seen_keys:
-            seen_keys.add(c["region_key"])
-            deduped.append(c)
+
+    for candidate in candidates:
+        region_key = candidate["region_key"]
+
+        if region_key in seen_keys:
+            continue
+
+        seen_keys.add(region_key)
+        deduped.append(candidate)
 
     if deduped:
+        # ذخیره کل نتایج
         context.user_data["match_candidates"] = deduped
+
+        # شروع از صفحه اول
+        context.user_data["match_page"] = 0
+
+        page = 0
+
         await update.message.reply_text(
-            "چند تا منطقه‌ی مشابه با همین کلمه پیدا شد "
-            "(هم از مکان‌های ثبت‌شده‌ی قبلی، هم از لیست قطعی امروز). "
-            "اگه یکیشون دقیقاً مکان خودته انتخابش کن، وگرنه بزن «هیچکدوم»:",
-            reply_markup=matches_keyboard(deduped),
+            _matches_text(deduped, page),
+            reply_markup=_matches_keyboard(deduped, page),
         )
+
         return CHOOSING_MATCH
 
-    await update.message.reply_text(_confirm_text(loc), reply_markup=confirm_keyboard())
+    await update.message.reply_text(
+        _confirm_text(loc),
+        reply_markup=confirm_keyboard(),
+    )
+
     return CONFIRMING
 
-
-async def pick_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def matches_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
     await query.answer()
-    idx = int(query.data.split(":", 1)[1])
-    candidates = context.user_data.get("match_candidates", [])
 
-    if idx >= len(candidates):
-        await query.edit_message_text("خطایی رخ داد، دوباره شروع کن.")
+    value = query.data.split(":", 1)[1]
+
+    if value == "noop":
+        return CHOOSING_MATCH
+
+    try:
+        page = int(value)
+    except ValueError:
+        return CHOOSING_MATCH
+
+    candidates = context.user_data.get(
+        "match_candidates",
+        [],
+    )
+
+    if not candidates:
+        await query.edit_message_text(
+            "نتایج جستجو منقضی شده. دوباره منطقه رو جستجو کن."
+        )
+        return ConversationHandler.END
+
+    total_pages = (
+        len(candidates) + MATCHES_PER_PAGE - 1
+    ) // MATCHES_PER_PAGE
+
+    if page < 0 or page >= total_pages:
+        return CHOOSING_MATCH
+
+    context.user_data["match_page"] = page
+
+    await query.edit_message_text(
+        _matches_text(candidates, page),
+        reply_markup=_matches_keyboard(candidates, page),
+    )
+
+    return CHOOSING_MATCH
+    
+async def pick_match(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        idx = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "انتخاب نامعتبر بود. دوباره تلاش کن."
+        )
+        return ConversationHandler.END
+
+    candidates = context.user_data.get(
+        "match_candidates",
+        [],
+    )
+
+    if idx < 0 or idx >= len(candidates):
+        await query.edit_message_text(
+            "این نتیجه دیگر معتبر نیست. دوباره جستجو کن."
+        )
         return ConversationHandler.END
 
     chosen = candidates[idx]
+
     loc = context.user_data["new_location"]
-    # عیناً همون مقادیر و همون region_key رکورد قبلی رو کپی می‌کنیم تا کش reuse بشه
+
+    # همان region_key رکورد انتخاب‌شده را استفاده می‌کنیم
+    # تا کش outage دوباره قابل استفاده باشد.
     loc["city_fa"] = chosen["city_fa"]
     loc["district_fa"] = chosen["district_fa"]
     loc["region_key"] = chosen["region_key"]
 
-    await query.edit_message_text(_confirm_text(loc), reply_markup=confirm_keyboard())
-    return CONFIRMING
+    await query.edit_message_text(
+        _confirm_text(loc),
+        reply_markup=confirm_keyboard(),
+    )
 
+    return CONFIRMING
 
 async def use_new_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -408,8 +638,18 @@ def build_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, district_typed),
             ],
             CHOOSING_MATCH: [
-                CallbackQueryHandler(pick_match, pattern="^pick_match:"),
-                CallbackQueryHandler(use_new_location, pattern="^use_new$"),
+                CallbackQueryHandler(
+                pick_match,
+            pattern=r"^pick_match:\d+$",
+                    ),
+                CallbackQueryHandler(
+                matches_page,
+                pattern=r"^match_page:(?:\d+|noop)$",
+                    ),
+                CallbackQueryHandler(
+                use_new_location,
+                pattern="^use_new$",
+                    ),
             ],
             CONFIRMING: [
                 CallbackQueryHandler(confirm_location, pattern="^confirm_location$"),
