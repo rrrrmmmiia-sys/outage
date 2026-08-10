@@ -58,12 +58,13 @@ async def find_similar_locations(
     county_code: str,
     city_fa: str,
     district_fa: str,
-    limit: int = 5,
+    limit: int = 1000,
 ) -> list[dict]:
     """
-    دنبال مکان‌های از قبل ثبت‌شده‌ی مشابه (همون شهرستان) می‌گرده تا اگه یکی از
-    کاربرهای قبلی همین منطقه رو با یه املای کمی متفاوت ثبت کرده، کاربر جدید
-    بتونه همون رکورد رو انتخاب کنه و نیازی به سرچ جدید نباشه.
+    پیدا کردن مکان‌های مشابه ثبت‌شده قبلی.
+
+    limit عمداً بزرگ‌تر است تا pagination در لایه Telegram
+    انجام شود و کاربر بتواند تمام نتایج را با صفحه‌بندی ببیند.
     """
     result = await session.execute(
         _SIMILAR_LOCATIONS_QUERY,
@@ -75,8 +76,8 @@ async def find_similar_locations(
             "limit": limit,
         },
     )
-    return [dict(row) for row in result.mappings().all()]
 
+    return [dict(row) for row in result.mappings().all()]
 
 _OUTAGE_WORD_SIMILARITY_THRESHOLD = 0.3
 
@@ -110,14 +111,15 @@ async def find_similar_outage_entries(
     county_code: str,
     date: dt.date,
     keyword: str,
-    limit: int = 5,
+    limit: int = 1000,
 ) -> list[dict]:
     """
-    داخل داده‌ی خامی که هرمس همون روز نوشته (outage_cache) دنبال آدرس‌های
-    مشابه کلمه‌ی کلیدی کاربر می‌گرده. برای وقتیه که هرمس به‌جای سرچ مناطق
-    ثبت‌شده، کل لیست قطعی شهر رو یک‌جا ریخته تو دیتابیس.
+    پیدا کردن مناطق مشابه داخل outage_cache برای امروز.
+
+    نتایج برای pagination به handler برگردانده می‌شوند.
     """
     prefix = f"mazandaran|{county_code}|%"
+
     result = await session.execute(
         _SIMILAR_OUTAGES_QUERY,
         {
@@ -128,4 +130,5 @@ async def find_similar_outage_entries(
             "limit": limit,
         },
     )
+
     return [dict(row) for row in result.mappings().all()]
