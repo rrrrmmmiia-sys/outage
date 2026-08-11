@@ -3,7 +3,8 @@ name: Fetch Mazandaran Outages
 on:
   schedule:
     # هر روز ساعت ۲۱:۰۰ UTC = ۰۰:۳۰ به وقت تهران (ایران DST نداره، همیشه UTC+3:30)
-    - cron: "0 21 * * *"
+    - cron: "0 0 * * *"
+      timezone: "Asia/Tehran"
   workflow_dispatch: {}  # اجازه‌ی اجرای دستی از تب Actions گیت‌هاب، برای تست
 
 jobs:
