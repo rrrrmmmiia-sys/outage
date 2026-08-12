@@ -633,22 +633,91 @@ async def check_now_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=back_to_locations_keyboard())
 
 
-async def delete_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_location(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
     await query.answer()
-    loc_id = int(query.data.split(":", 1)[1])
+
+    try:
+        loc_id = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "❌ شناسه مکان نامعتبر است.",
+            reply_markup=back_to_locations_keyboard(),
+        )
+        return
 
     async with get_session() as session:
+        user = await _get_or_create_user(
+            session,
+            update.effective_user,
+        )
+
         location = await session.get(Location, loc_id)
-        if location:
-            await session.delete(location)
-            await session.commit()
-        user = await _get_or_create_user(session, update.effective_user)
+
+        # مکان وجود ندارد
+        if not location:
+            locations = await _get_user_locations(session, user.id)
+
+            if locations:
+                await query.edit_message_text(
+                    "⚠️ این مکان قبلاً حذف شده است.",
+                    reply_markup=location_list_keyboard(locations),
+                )
+            else:
+                await query.edit_message_text(
+                    "هنوز مکانی ثبت نکردی.",
+                    reply_markup=main_menu_keyboard(
+                        user.nightly_summary_enabled
+                    ),
+                )
+
+            return
+
+        # امنیت: مکان باید متعلق به همین کاربر باشد
+        if location.user_id != user.id:
+            await query.answer(
+                "❌ این مکان متعلق به شما نیست.",
+                show_alert=True,
+            )
+            return
+
+        await session.delete(location)
+        await session.commit()
+
+        # لیست جدید مکان‌های همین کاربر
+        locations = await _get_user_locations(
+            session,
+            user.id,
+        )
+
         nightly = user.nightly_summary_enabled
 
-    await query.edit_message_text("مکان حذف شد.", reply_markup=main_menu_keyboard(nightly))
+    # اگر دیگر مکانی باقی نمانده
+    if not locations:
+        await query.edit_message_text(
+            "🗑 مکان با موفقیت حذف شد.\n\n"
+            "هنوز هیچ مکان دیگری ثبت نکردی.",
+            reply_markup=main_menu_keyboard(nightly),
+        )
+        return
 
+    # دوباره صفحه مکان‌های من را بساز
+    lines = ["🗺 مکان‌های ثبت‌شده‌ی شما:\n"]
 
+    for loc in locations:
+        lines.append(
+            f"📍 {loc.city_fa} / {loc.district_fa}"
+        )
+
+    lines.append("\nمکان موردنظر را انتخاب کن:")
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=location_list_keyboard(locations),
+    )
 def build_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(add_location_start, pattern="^add_location$")],
