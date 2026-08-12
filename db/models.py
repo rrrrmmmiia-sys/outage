@@ -1,5 +1,5 @@
 import datetime as dt
-
+from sqlalchemy import Text
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -64,8 +64,7 @@ class Location(Base):
     district_fa: Mapped[str] = mapped_column(String(255))
 
     # کلید یکتای منطقه که برای کش استفاده میشه (نرمالایز شده، مستقل از کاربر)
-    region_key: Mapped[str] = mapped_column(String(512), index=True)
-
+    region_key: Mapped[str] = mapped_column(Text, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )
