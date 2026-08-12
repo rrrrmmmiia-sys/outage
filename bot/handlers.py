@@ -1207,7 +1207,7 @@ async def delete_location(
         "DELETE LOCATION CALLBACK RECEIVED: %s",
         query.data,
     )
-        return
+        
 
     async with get_session() as session:
 
