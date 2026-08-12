@@ -114,7 +114,10 @@ class NotificationSent(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"), index=True)
+    location_id: Mapped[int] = mapped_column(
+    ForeignKey("locations.id", ondelete="CASCADE"),
+    index=True,
+)
     date: Mapped[dt.date] = mapped_column(Date, index=True)
     sent_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
