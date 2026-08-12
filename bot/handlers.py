@@ -1196,27 +1196,17 @@ async def delete_location(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
 
-    await query.answer()
+    await query.answer(
+        "DELETE CALLBACK RECEIVED",
+        show_alert=True,
+    )
 
-    try:
-
-        loc_id = int(
-            query.data.split(
-                ":",
-                1,
-            )[1]
-        )
-
-    except (ValueError, IndexError):
-
-        await query.answer(
-            "❌ شناسه مکان نامعتبر است.",
-            show_alert=True,
-        )
-
+    logger.warning(
+        "DELETE LOCATION CALLBACK RECEIVED: %s",
+        query.data,
+    )
         return
 
     async with get_session() as session:
