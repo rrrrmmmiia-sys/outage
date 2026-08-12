@@ -1204,10 +1204,25 @@ async def delete_location(
     )
 
     logger.warning(
-        "DELETE LOCATION CALLBACK RECEIVED: %s",
+        "DELETE CALLBACK: %s",
         query.data,
     )
-        
+
+    try:
+        loc_id = int(
+            query.data.split(":", 1)[1]
+        )
+    except (ValueError, IndexError):
+        logger.error(
+            "INVALID LOCATION ID: %s",
+            query.data,
+        )
+        return
+
+    logger.warning(
+        "TRYING TO DELETE LOCATION ID=%s",
+        loc_id,
+    )
 
     async with get_session() as session:
 
@@ -1216,10 +1231,13 @@ async def delete_location(
             update.effective_user,
         )
 
-        # فقط مکان متعلق به همین کاربر
+        logger.warning(
+            "CURRENT USER ID=%s",
+            user.id,
+        )
+
         location = await session.scalar(
-            select(Location)
-            .where(
+            select(Location).where(
                 Location.id == loc_id,
                 Location.user_id == user.id,
             )
@@ -1227,119 +1245,42 @@ async def delete_location(
 
         if location is None:
 
-            locations = await _get_user_locations(
-                session,
+            logger.error(
+                "LOCATION NOT FOUND: id=%s user_id=%s",
+                loc_id,
                 user.id,
             )
 
-            if locations:
-
-                lines = [
-                    "🗺 مکان‌های ثبت‌شده‌ی شما:\n"
-                ]
-
-                for index, loc in enumerate(
-                    locations,
-                    start=1,
-                ):
-
-                    lines.append(
-                        f"{index}️⃣ "
-                        f"{loc.city_fa} / "
-                        f"{loc.district_fa}"
-                    )
-
-                lines.append(
-                    "\nمکان موردنظر را انتخاب کن:"
-                )
-
-                await query.edit_message_text(
-                    "\n".join(lines),
-                    reply_markup=location_list_keyboard(
-                        locations
-                    ),
-                )
-
-            else:
-
-                await query.edit_message_text(
-                    "📍 هنوز هیچ مکانی ثبت نکردی.",
-                    reply_markup=main_menu_keyboard(
-                        user.nightly_summary_enabled
-                    ),
-                )
+            await query.answer(
+                "❌ مکان پیدا نشد.",
+                show_alert=True,
+            )
 
             return
 
-        deleted_label = (
-            f"{location.city_fa} / "
-            f"{location.district_fa}"
+        logger.warning(
+            "FOUND LOCATION: id=%s region=%s",
+            location.id,
+            location.region_key,
         )
 
-        # حذف واقعی Location
         await session.delete(location)
+
+        logger.warning(
+            "LOCATION MARKED FOR DELETE: id=%s",
+            location.id,
+        )
 
         await session.commit()
 
-        # دریافت لیست جدید
-        locations = await _get_user_locations(
-            session,
-            user.id,
+        logger.warning(
+            "DELETE COMMITTED: id=%s",
+            loc_id,
         )
-
-        nightly = (
-            user.nightly_summary_enabled
-        )
-
-    # ========================================================
-    # اگر هیچ مکان دیگری باقی نمانده
-    # ========================================================
-
-    if not locations:
-
-        await query.edit_message_text(
-            "🗑 مکان با موفقیت حذف شد.\n\n"
-            f"📍 {deleted_label}\n\n"
-            "در حال حاضر هیچ مکان دیگری "
-            "ثبت نکردی.",
-            reply_markup=main_menu_keyboard(
-                nightly
-            ),
-        )
-
-        return
-
-    # ========================================================
-    # نمایش دوباره مکان‌های من
-    # ========================================================
-
-    lines = [
-        "🗺 مکان‌های ثبت‌شده‌ی شما:\n"
-    ]
-
-    for index, loc in enumerate(
-        locations,
-        start=1,
-    ):
-
-        lines.append(
-            f"{index}️⃣ "
-            f"{loc.city_fa} / "
-            f"{loc.district_fa}"
-        )
-
-    lines.append(
-        "\nبرای هر مکان می‌تونی وضعیت "
-        "قطعی رو ببینی یا حذفش کنی."
-    )
 
     await query.edit_message_text(
-        "\n".join(lines),
-        reply_markup=location_list_keyboard(
-            locations
-        ),
+        "✅ مکان با موفقیت حذف شد."
     )
-
 
 # ============================================================
 # Conversation Handler
