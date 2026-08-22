@@ -5,6 +5,8 @@ from data.iran_divisions import PROVINCES
 
 MAZANDARAN_CODE = "mazandaran"
 
+PAGE_SIZE = 5  # تعداد مکان در هر صفحه‌ی «مکان‌های من»
+
 
 def counties_keyboard() -> InlineKeyboardMarkup:
     """
@@ -98,19 +100,29 @@ def back_to_locations_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def location_list_keyboard(locations) -> InlineKeyboardMarkup:
+def location_list_keyboard(
+    locations,
+    page: int = 0,
+    per_page: int = PAGE_SIZE,
+) -> InlineKeyboardMarkup:
     """
-    دکمه‌های مکان‌های ثبت‌شده کاربر.
+    دکمه‌های مکان‌های ثبت‌شده کاربر با صفحه‌بندی.
 
     عمداً نام طولانی مکان را داخل دکمه قرار نمی‌دهیم،
     چون Telegram در موبایل ممکن است آن را با ... نمایش دهد.
 
     نام کامل مکان در متن پیام نمایش داده می‌شود.
+    اگه تعداد مکان‌ها بیشتر از per_page باشه، ردیف ناوبری
+    ◀️ ۱/۳ ▶️ هم اضافه میشه (دکمه‌ی شماره صفحه غیرفعاله).
     """
 
     rows = []
 
-    for loc in locations:
+    start = page * per_page
+
+    page_locs = locations[start:start + per_page]
+
+    for loc in page_locs:
 
         rows.append(
             [
@@ -124,6 +136,40 @@ def location_list_keyboard(locations) -> InlineKeyboardMarkup:
                 ),
             ]
         )
+
+    total_pages = max(
+        1,
+        -(-len(locations) // per_page),  # ceil division
+    )
+
+    if total_pages > 1:
+
+        navigation = []
+
+        if page > 0:
+            navigation.append(
+                InlineKeyboardButton(
+                    "◀️ قبلی",
+                    callback_data=f"locs_page:{page - 1}",
+                )
+            )
+
+        navigation.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}",
+                callback_data="locs_page:noop",
+            )
+        )
+
+        if page < total_pages - 1:
+            navigation.append(
+                InlineKeyboardButton(
+                    "بعدی ▶️",
+                    callback_data=f"locs_page:{page + 1}",
+                )
+            )
+
+        rows.append(navigation)
 
     rows.append(
         [

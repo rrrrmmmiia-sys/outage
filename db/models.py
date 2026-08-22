@@ -54,7 +54,10 @@ class Location(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
 
     province_code: Mapped[str] = mapped_column(String(64))
     province_fa: Mapped[str] = mapped_column(String(128))
@@ -117,6 +120,28 @@ class NotificationSent(Base):
     ForeignKey("locations.id", ondelete="CASCADE"),
     index=True,
 )
+    date: Mapped[dt.date] = mapped_column(Date, index=True)
+    sent_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow
+    )
+
+
+class NightlySummarySent(Base):
+    """
+    جلوگیری از ارسال تکراری خلاصه‌ی شبانه برای یک کاربر در یک شب مشخص.
+    date برابر با تاریخِ «فردا»ی موضوع خلاصه است، نه تاریخ ارسال.
+    """
+
+    __tablename__ = "nightly_summaries_sent"
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", name="uq_nightly_user_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
     date: Mapped[dt.date] = mapped_column(Date, index=True)
     sent_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow

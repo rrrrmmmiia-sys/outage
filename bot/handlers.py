@@ -23,6 +23,7 @@ import config
 
 from bot.keyboards import (
     MAZANDARAN_CODE,
+    PAGE_SIZE,
     back_to_locations_keyboard,
     confirm_keyboard,
     counties_keyboard,
@@ -988,7 +989,12 @@ async def cancel_flow(
 async def my_locations(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    page: int = 0,
 ):
+    """
+    لیست مکان‌ها با صفحه‌بندی. هم از دکمه‌ی منو صدا زده میشه و هم
+    از دکمه‌های ◀️/▶️ صفحه‌بندی (با پارامتر page).
+    """
 
     query = update.callback_query
 
@@ -1021,19 +1027,36 @@ async def my_locations(
 
         return
 
+    # اگه صفحه درخواستی خارج از بازه باشه، به صفحه‌ی معتبر محدود میشه
+    per_page = PAGE_SIZE
+
+    total_pages = max(
+        1,
+        -(-len(locations) // per_page),
+    )
+
+    page = max(0, min(page, total_pages - 1))
+
     lines = [
         "🗺 مکان‌های ثبت‌شده‌ی شما:\n"
     ]
 
+    start = page * per_page
+
     for index, loc in enumerate(
-        locations,
-        start=1,
+        locations[start:start + per_page],
+        start=start + 1,
     ):
 
         lines.append(
             f"{index}️⃣ "
             f"{loc.city_fa} / "
             f"{loc.district_fa}"
+        )
+
+    if total_pages > 1:
+        lines.append(
+            f"\nصفحه {page + 1} از {total_pages}"
         )
 
     lines.append(
@@ -1044,8 +1067,49 @@ async def my_locations(
     await query.edit_message_text(
         "\n".join(lines),
         reply_markup=location_list_keyboard(
-            locations
+            locations,
+            page=page,
+            per_page=per_page,
         ),
+    )
+
+
+# ============================================================
+# صفحه‌بندی لیست مکان‌ها
+# ============================================================
+
+async def my_locations_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    try:
+
+        value = query.data.split(":", 1)[1]
+
+    except (IndexError, AttributeError):
+
+        return
+
+    if value == "noop":
+        return  # دکمه‌ی شماره صفحه غیرفعاله؛ فقط answer شد
+
+    try:
+
+        page = int(value)
+
+    except ValueError:
+
+        page = 0
+
+    await my_locations(
+        update,
+        context,
+        page=page,
     )
 
 
@@ -1385,6 +1449,13 @@ def register_handlers(app):
         CallbackQueryHandler(
             my_locations,
             pattern="^my_locations$",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            my_locations_page,
+            pattern=r"^locs_page:(?:\d+|noop)$",
         )
     )
 

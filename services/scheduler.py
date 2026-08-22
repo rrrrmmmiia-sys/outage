@@ -1,13 +1,20 @@
 import datetime as dt
 import logging
+from collections import defaultdict
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 import config
 from db.database import get_session
-from db.models import Location, NotificationSent, OutageCache, User
+from db.models import (
+    Location,
+    NightlySummarySent,
+    NotificationSent,
+    OutageCache,
+    User,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +38,12 @@ async def notification_worker(bot):
     چون ممکن است مکان ذخیره‌شده مثلاً «فارابی» باشد ولی
     note قطعی یک توضیح طولانی‌تر مثل:
     «123- ... کوچه‌های فارابی - ولیعصر ...» داشته باشد.
+
+    نکته‌ی مهم درباره‌ی پنجره‌ی هشدار:
+    مقایسه با تاریخ کامل (datetime.combine) انجام میشه نه صرفاً time،
+    چون اگه الان نزدیک نیمه‌شب باشه و قطعی فردا ساعت ۰۰:۰۵ شروع بشه،
+    مقایسه‌ی صرفِ time باعث میشد window_end کوچکتر از window_start بشه
+    و هیچ هشداری فرستاده نشه.
     """
 
     now = dt.datetime.now(TZ)
@@ -38,34 +51,49 @@ async def notification_worker(bot):
 
     notify_minutes = config.NOTIFY_MINUTES_BEFORE
 
-    window_start = (
-        now + dt.timedelta(minutes=notify_minutes - 1)
-    ).time()
+    window_low = now + dt.timedelta(
+        minutes=notify_minutes - 1
+    )
+    window_high = now + dt.timedelta(
+        minutes=notify_minutes + 1
+    )
 
-    window_end = (
-        now + dt.timedelta(minutes=notify_minutes + 1)
-    ).time()
+    # ردیف‌های امروز و فردا رو با هم می‌خونیم تا قطعی‌های بعد از نیمه‌شب
+    # (که تو دیتابیس با date=فردا ثبت شدن) هم پوشش داده بشن
+    candidate_dates = sorted(
+        {today, today + dt.timedelta(days=1)}
+    )
 
     async with get_session() as session:
 
         # ---------------------------------------------------------
-        # 1. قطعی‌های امروز که زمان شروعشان در بازه هشدار است
+        # 1. قطعی‌هایی که زمان شروعشان در بازه هشدار است
         # ---------------------------------------------------------
 
         cache_result = await session.execute(
             select(OutageCache).where(
-                OutageCache.date == today,
+                OutageCache.date.in_(candidate_dates),
                 OutageCache.found == True,  # noqa: E712
                 OutageCache.start_time.is_not(None),
-                OutageCache.start_time >= window_start,
-                OutageCache.start_time <= window_end,
             )
         )
 
-        due_caches = cache_result.scalars().all()
+        all_caches = cache_result.scalars().all()
+
+        due_caches = [
+            c
+            for c in all_caches
+            if window_low
+            <= dt.datetime.combine(
+                c.date, c.start_time, tzinfo=TZ
+            )
+            <= window_high
+        ]
 
         if not due_caches:
             return
+
+        due_keys = {c.region_key for c in due_caches}
 
         logger.info(
             "Notification worker: %s outage(s) due around %s",
@@ -85,6 +113,11 @@ async def notification_worker(bot):
 
         if not locations:
             return
+
+        # نگاشت region_key -> قطعی سررسیده (برای تطبیق دقیق سریع)
+        cache_by_region = {
+            c.region_key: c for c in due_caches
+        }
 
         # ---------------------------------------------------------
         # 3. برای هر مکان کاربر، قطعی مناسب را پیدا می‌کنیم
@@ -119,91 +152,53 @@ async def notification_worker(bot):
                 continue
 
             # -----------------------------------------------------
-            # 5. جستجوی قطعی مناسب این مکان
+            # 5. پیدا کردن قطعی سررسیده‌ی این مکان
             #
-            # ابتدا شهر و شهرستان را محدود می‌کنیم.
-            # سپس district کاربر باید واقعاً داخل note قطعی وجود
-            # داشته باشد.
+            # اول تطبیق دقیق region_key (سریع و بدون ابهام).
+            # اگه پیدا نشد، فالبک: district کاربر باید واقعاً داخل
+            # note یکی از همون چند قطعیِ سررسیده باشه — چون ممکنه
+            # کاربر متن آزاد تایپ کرده باشه و region_key اش با
+            # کلید رکورد خام هرمس یکی نباشه.
             # -----------------------------------------------------
 
-            keyword = (location.district_fa or "").strip()
-
-            if not keyword:
+            if not (location.district_fa or "").strip():
                 logger.warning(
                     "Location %s has empty district_fa",
                     location.id,
                 )
                 continue
 
-            # normalize ساده برای جلوگیری از تفاوت ي / ی و ك / ک
-            keyword_normalized = (
-                keyword
-                .replace("ي", "ی")
-                .replace("ك", "ک")
-                .strip()
+            cache = cache_by_region.get(
+                location.region_key
             )
 
-            outage_result = await session.execute(
-                text(
-                    """
-                    SELECT
-                        oc.id,
-                        oc.region_key,
-                        oc.note,
-                        oc.start_time,
-                        oc.end_time
-                    FROM outage_cache AS oc
-                    WHERE oc.date = :date
-                      AND oc.found = TRUE
-                      AND oc.start_time IS NOT NULL
+            if cache is None:
 
-                      -- فقط همان شهرستان
-                      AND oc.region_key LIKE :county_prefix
+                keyword = (
+                    location.district_fa
+                    .replace("ي", "ی")
+                    .replace("ك", "ک")
+                    .strip()
+                )
 
-                      -- فقط قطعی‌هایی که زمانشان همین حوالی است
-                      AND oc.start_time >= :window_start
-                      AND oc.start_time <= :window_end
+                for candidate in due_caches:
 
-                      -- عبارت منطقه کاربر باید واقعاً
-                      -- داخل توضیح قطعی وجود داشته باشد
-                      AND translate(
-                          oc.note,
-                          'يك',
-                          'یک'
-                      ) ILIKE
-                          '%' ||
-                          translate(
-                              :keyword,
-                              'يك',
-                              'یک'
-                          ) ||
-                          '%'
+                    note = (
+                        candidate.note or ""
+                    ).replace("ي", "ی").replace("ك", "ک")
 
-                    ORDER BY oc.start_time
-                    LIMIT 20
-                    """
-                ),
-                {
-                    "date": today,
-                    "county_prefix": (
-                        f"mazandaran|{location.county_code}|%"
-                    ),
-                    "window_start": window_start,
-                    "window_end": window_end,
-                    "keyword": keyword_normalized,
-                },
-            )
+                    if keyword in note:
 
-            outages = outage_result.mappings().all()
+                        cache = candidate
 
-            if not outages:
+                        break
+
+            if cache is None:
                 continue
 
             # -----------------------------------------------------
             # 6. قطعی پیدا شد
             # -----------------------------------------------------
-
-            cache = outages[0]
 
             logger.info(
                 "MATCH FOUND: location_id=%s | user=%s | "
@@ -212,7 +207,7 @@ async def notification_worker(bot):
                 user.telegram_id,
                 location.city_fa,
                 location.district_fa,
-                cache["note"],
+                cache.note,
             )
 
             # -----------------------------------------------------
@@ -225,13 +220,13 @@ async def notification_worker(bot):
                 f"مکان: {location.city_fa} - "
                 f"{location.district_fa}\n"
                 f"ساعت شروع: "
-                f"{cache['start_time'].strftime('%H:%M')}\n"
+                f"{cache.start_time.strftime('%H:%M')}\n"
             )
 
-            if cache["end_time"]:
+            if cache.end_time:
                 message += (
                     f"ساعت پایان: "
-                    f"{cache['end_time'].strftime('%H:%M')}\n"
+                    f"{cache.end_time.strftime('%H:%M')}\n"
                 )
 
             # -----------------------------------------------------
@@ -282,6 +277,7 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     راه‌اندازی Scheduler.
 
     notification_worker هر یک دقیقه اجرا می‌شود.
+    nightly_summary_worker هم هر شب بعد از نوشتن دیتای هرمس اجرا می‌شود.
     """
 
     scheduler = AsyncIOScheduler(
@@ -298,11 +294,178 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        nightly_summary_worker,
+        "cron",
+        hour=config.NIGHTLY_SUMMARY_HOUR,
+        minute=config.NIGHTLY_SUMMARY_MINUTE,
+        args=[bot],
+        id="nightly_summary_worker",
+        # اگه ربات دقیقاً سرِ ساعت بالا نبود، تا ۱ ساعت بعد هم جبران میشه
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     logger.info(
         "Notification scheduler started. "
-        "Interval: 1 minute"
+        "Interval: 1 minute. "
+        "Nightly summary at %02d:%02d.",
+        config.NIGHTLY_SUMMARY_HOUR,
+        config.NIGHTLY_SUMMARY_MINUTE,
     )
 
     return scheduler
+
+
+async def nightly_summary_worker(bot):
+    """
+    هر شب (بعد از اینکه هرمس دیتای فردا رو نوشت) برای کاربرهایی که
+    خلاصه‌ی شبانه براشون روشنه، ساعت قطعی فردای همه‌ی مکان‌هاشون رو
+    در یک پیام می‌فرسته.
+    """
+
+    now = dt.datetime.now(TZ)
+    tomorrow = (now + dt.timedelta(days=1)).date()
+
+    async with get_session() as session:
+
+        user_result = await session.execute(
+            select(User).where(
+                User.nightly_summary_enabled == True  # noqa: E712
+            )
+        )
+
+        users = user_result.scalars().all()
+
+        if not users:
+            return
+
+        user_ids = [u.id for u in users]
+
+        location_result = await session.execute(
+            select(Location).where(
+                Location.user_id.in_(user_ids)
+            )
+        )
+
+        locations = location_result.scalars().all()
+
+        if not locations:
+            return
+
+        region_keys = sorted(
+            {loc.region_key for loc in locations}
+        )
+
+        cache_result = await session.execute(
+            select(OutageCache).where(
+                OutageCache.region_key.in_(region_keys),
+                OutageCache.date == tomorrow,
+            )
+        )
+
+        cache_by_region = {
+            c.region_key: c
+            for c in cache_result.scalars().all()
+        }
+
+        # جلوگیری از ارسال تکراری اگه جاب دو بار تو یه شب اجرا بشه
+        sent_result = await session.execute(
+            select(NightlySummarySent.user_id).where(
+                NightlySummarySent.user_id.in_(user_ids),
+                NightlySummarySent.date == tomorrow,
+            )
+        )
+
+        already_sent_ids = set(
+            sent_result.scalars().all()
+        )
+
+        locs_by_user = defaultdict(list)
+
+        for loc in locations:
+            locs_by_user[loc.user_id].append(loc)
+
+        for user in users:
+
+            if user.id in already_sent_ids:
+                continue
+
+            user_locs = locs_by_user.get(user.id)
+
+            if not user_locs:
+                continue
+
+            lines = [
+                f"🌙 خلاصه‌ی قطعی فردا "
+                f"({tomorrow.isoformat()}):\n"
+            ]
+
+            for loc in user_locs:
+
+                cache = cache_by_region.get(
+                    loc.region_key
+                )
+
+                if (
+                    cache
+                    and cache.found
+                    and cache.start_time
+                ):
+
+                    time_range = (
+                        cache.start_time.strftime("%H:%M")
+                    )
+
+                    if cache.end_time:
+                        time_range += (
+                            " تا "
+                            + cache.end_time.strftime("%H:%M")
+                        )
+
+                    lines.append(
+                        f"⚡ {loc.city_fa} - "
+                        f"{loc.district_fa}: {time_range}"
+                    )
+
+                else:
+
+                    lines.append(
+                        f"▫️ {loc.city_fa} - "
+                        f"{loc.district_fa}: "
+                        "قطعی برنامه‌ریزی‌شده‌ای پیدا نشد"
+                    )
+
+            try:
+
+                await bot.send_message(
+                    chat_id=user.telegram_id,
+                    text="\n".join(lines),
+                )
+
+                session.add(
+                    NightlySummarySent(
+                        user_id=user.id,
+                        date=tomorrow,
+                    )
+                )
+
+                await session.commit()
+
+                logger.info(
+                    "Nightly summary sent: user=%s",
+                    user.telegram_id,
+                )
+
+            except Exception as exc:
+
+                await session.rollback()
+
+                logger.error(
+                    "خطا در ارسال خلاصه‌ی شبانه به کاربر %s: %s",
+                    user.telegram_id,
+                    exc,
+                    exc_info=True,
+                )
