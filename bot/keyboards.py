@@ -79,6 +79,12 @@ def main_menu_keyboard(
             ],
             [
                 InlineKeyboardButton(
+                    "📊 وضعیت امروز همه‌ی مکان‌ها",
+                    callback_data="status_dashboard",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     toggle_label,
                     callback_data="toggle_nightly",
                 )

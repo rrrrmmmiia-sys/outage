@@ -1,5 +1,6 @@
 import datetime as dt
 import logging
+from collections import defaultdict
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -34,7 +35,7 @@ from bot.keyboards import (
 from data.iran_divisions import PROVINCES
 
 from db.database import get_session
-from db.models import Location, User
+from db.models import Location, OutageCache, User
 
 from services.outage_service import (
     build_region_key,
@@ -1117,6 +1118,23 @@ async def my_locations_page(
 # وضعیت فعلی قطعی
 # ============================================================
 
+def _format_outage_ranges(outages) -> str:
+    """لیست بازه‌های قطعی یک مکان را به «۰۹:۰۰ تا ۱۰:۰۰ و ۱۷:۰۰ تا ...» تبدیل می‌کند"""
+
+    ranges = []
+
+    for outage in outages:
+
+        rng = outage.start_time.strftime("%H:%M")
+
+        if outage.end_time:
+            rng += " تا " + outage.end_time.strftime("%H:%M")
+
+        ranges.append(rng)
+
+    return " و ".join(ranges)
+
+
 async def check_now_status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1173,82 +1191,191 @@ async def check_now_status(
             TZ
         ).date()
 
-        cache = await get_cached_outage(
-            session,
-            location.region_key,
-            today,
+        # چند قطعی در روز → همه‌ی ردیف‌های امروزِ این منطقه
+        outages_result = await session.execute(
+            select(OutageCache)
+            .where(
+                OutageCache.region_key == location.region_key,
+                OutageCache.date == today,
+                OutageCache.found == True,  # noqa: E712
+                OutageCache.start_time.is_not(None),
+            )
+            .order_by(OutageCache.start_time)
         )
+
+        outages = list(outages_result.scalars().all())
 
     label = (
         f"{location.city_fa} - "
         f"{location.district_fa}"
     )
 
-    if cache is None:
+    if not outages:
 
         text = (
             f"⚡ وضعیت الان برای {label}:\n\n"
-            "هنوز هیچ اطلاعاتی برای امروز "
-            "در دیتابیس ثبت نشده.\n\n"
-            "ممکنه هرمس هنوز این منطقه رو "
-            "برای امروز بررسی نکرده باشه."
-        )
-
-    elif (
-        not cache.found
-        or not cache.start_time
-    ):
-
-        text = (
-            f"⚡ وضعیت الان برای {label}:\n\n"
-            "طبق آخرین بررسی، قطعی "
-            "برنامه‌ریزی‌شده‌ای برای امروز "
-            "پیدا نشده."
+            "طبق آخرین به‌روزرسانی (ساعت ۰۰:۳۰ شب)، قطعی "
+            "برنامه‌ریزی‌شده‌ای برای امروز این منطقه پیدا نشد."
         )
 
     else:
 
-        time_range = (
-            cache.start_time.strftime(
-                "%H:%M"
-            )
-        )
+        time_range = _format_outage_ranges(outages)
 
-        if cache.end_time:
+        note = outages[0].note or ""
 
-            time_range += (
-                " تا "
-                + cache.end_time.strftime(
-                    "%H:%M"
-                )
-            )
-
-        note = (
-            f"\n\n📌 {cache.note}"
-            if cache.note
-            else ""
+        last_updated = max(
+            (o.updated_at for o in outages if o.updated_at),
+            default=None,
         )
 
         updated = (
-            cache.updated_at.strftime(
-                "%H:%M"
-            )
-            if cache.updated_at
+            last_updated.strftime("%H:%M")
+            if last_updated
             else "-"
         )
 
+        note_line = f"\n\n📌 {note}" if note else ""
+
         text = (
             f"⚡ وضعیت الان برای {label}:\n\n"
-            f"🕐 قطعی امروز: "
-            f"{time_range}"
-            f"{note}\n\n"
-            f"🔄 آخرین بروزرسانی: "
-            f"{updated}"
+            f"🕐 قطعی امروز: {time_range}"
+            f"{note_line}\n\n"
+            f"🔄 آخرین بروزرسانی: {updated}"
         )
 
     await query.edit_message_text(
         text,
         reply_markup=back_to_locations_keyboard(),
+    )
+
+
+# ============================================================
+# داشبورد: وضعیت همه‌ی مکان‌ها در یک پیام
+# ============================================================
+
+async def status_dashboard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """داشبورد وضعیت همه‌ی مکان‌های کاربر در یک پیام (دکمه‌ی منو)"""
+
+    query = update.callback_query
+
+    await query.answer()
+
+    await _render_dashboard(
+        query.edit_message_text,
+        update.effective_user.id,
+        with_keyboard=True,
+    )
+
+
+async def status_dashboard_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """/status — همون داشبورد، ولی به‌صورت دستور متنی"""
+
+    await _render_dashboard(
+        update.message.reply_text,
+        update.effective_user.id,
+        with_keyboard=True,
+    )
+
+
+async def _render_dashboard(
+    reply_fn,
+    telegram_id: int,
+    with_keyboard: bool = True,
+):
+
+    async with get_session() as session:
+
+        user = await session.scalar(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+
+        if user is None:
+
+            await reply_fn(
+                "اول /start رو بزن تا ثبت‌نام کنی."
+            )
+
+            return
+
+        locations = await _get_user_locations(
+            session,
+            user.id,
+        )
+
+    if not locations:
+
+        await reply_fn(
+            "📍 هنوز هیچ مکانی ثبت نکردی. "
+            "از منوی اصلی «افزودن مکان جدید» رو بزن."
+        )
+
+        return
+
+    today = dt.datetime.now(TZ).date()
+
+    region_keys = [loc.region_key for loc in locations]
+
+    async with get_session() as session:
+
+        outages_result = await session.execute(
+            select(OutageCache)
+            .where(
+                OutageCache.region_key.in_(region_keys),
+                OutageCache.date == today,
+                OutageCache.found == True,  # noqa: E712
+                OutageCache.start_time.is_not(None),
+            )
+            .order_by(OutageCache.start_time)
+        )
+
+        all_outages = outages_result.scalars().all()
+
+    # گروه‌بندی بر اساس region_key (چند قطعی در روز → چند بازه پشت هم)
+    outages_by_region = defaultdict(list)
+
+    for outage in all_outages:
+        outages_by_region[outage.region_key].append(outage)
+
+    now = dt.datetime.now(TZ)
+
+    lines = [
+        f"📊 وضعیت قطعی امروز ({today.isoformat()}):\n"
+    ]
+
+    for loc in locations:
+
+        label = f"{loc.city_fa} - {loc.district_fa}"
+
+        outages = outages_by_region.get(loc.region_key, [])
+
+        if not outages:
+            lines.append(f"✅ {label}: قطعی نداره")
+            continue
+
+        ranges = _format_outage_ranges(outages)
+
+        # آیا الان وسط قطعیه؟
+        is_out_now = any(
+            o.start_time <= now.time() and (o.end_time is None or now.time() <= o.end_time)
+            for o in outages
+        )
+
+        icon = "🚫" if is_out_now else "⚡"
+
+        lines.append(f"{icon} {label}: {ranges}")
+
+    await reply_fn(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(
+            user.nightly_summary_enabled
+        ),
     )
 
 
@@ -1425,6 +1552,106 @@ def build_conversation_handler() -> ConversationHandler:
 # ثبت Handlerها
 # ============================================================
 
+# ============================================================
+# دستورات متنی (/) — منوی کنار دکمه‌ی سنجاق
+# ============================================================
+
+async def add_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """/add — شروع جریان افزودن مکان (معادل دکمه‌ی منو)"""
+
+    # همون entry_point کانورسیشن رو شبیه‌سازی می‌کنیم
+    context.user_data["new_location"] = {
+        "province_code": MAZANDARAN_CODE,
+        "province_fa": PROVINCE_FA,
+    }
+
+    await update.message.reply_text(
+        "شهر خودت رو انتخاب کن:",
+        reply_markup=counties_keyboard(),
+    )
+
+    return CHOOSING_COUNTY
+
+
+async def locations_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """/locations — لیست مکان‌های ثبت‌شده (معادل دکمه‌ی منو)"""
+
+    async with get_session() as session:
+
+        user = await _get_or_create_user(
+            session,
+            update.effective_user,
+        )
+
+        locations = await _get_user_locations(
+            session,
+            user.id,
+        )
+
+    if not locations:
+
+        await update.message.reply_text(
+            "📍 هنوز هیچ مکانی ثبت نکردی. "
+            "با /add اولین مکانت رو ثبت کن.",
+            reply_markup=main_menu_keyboard(
+                user.nightly_summary_enabled
+            ),
+        )
+
+        return
+
+    lines = ["🗺 مکان‌های ثبت‌شده‌ی شما:\n"]
+
+    for index, loc in enumerate(locations, start=1):
+
+        lines.append(
+            f"{index}️⃣ {loc.city_fa} / {loc.district_fa}"
+        )
+
+    lines.append(
+        "\nبرای هر مکان می‌تونی وضعیت قطعی رو ببینی یا حذفش کنی."
+    )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=location_list_keyboard(
+            locations, page=0
+        ),
+    )
+
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    text = (
+        "🤖 راهنمای ربات هشدار قطعی برق مازندران\n\n"
+        "این ربات ساعت قطعی برق مناطق مازندران رو از "
+        "سایت توزیع برق می‌گیره و بهت هشدار میده.\n\n"
+        "📌 قابلیت‌ها:\n"
+        "• تا ۳ مکان می‌تونی ثبت کنی\n"
+        "• حدود ۱ ساعت قبل و ۱۰ دقیقه قبل از هر قطعی "
+        "هشدار می‌گیری (برای هر قطعی جداگانه)\n"
+        "• هر شب ساعت ۲۲:۱۵ خلاصه‌ی قطعی‌های فردا رو "
+        "می‌فرستم (قابل خاموش کردن از منو)\n"
+        "• با /status وضعیت همه‌ی مکان‌هات رو یکجا ببین\n\n"
+        "⚡ دستورات:\n"
+        "/status — داشبورد وضعیت امروز\n"
+        "/add — افزودن مکان جدید\n"
+        "/locations — لیست مکان‌های من\n"
+        "/help — همین راهنما"
+    )
+
+    await update.message.reply_text(text)
+
+
 def register_handlers(app):
 
     app.add_handler(
@@ -1433,6 +1660,12 @@ def register_handlers(app):
             start,
         )
     )
+
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("locations", locations_command))
+
+    # /add باید «داخل» کانورسیشن هم کار کنه (اگه وسط جریان دیگه‌ای بود)
+    app.add_handler(CommandHandler("add", add_command))
 
     app.add_handler(
         build_conversation_handler()
@@ -1456,6 +1689,20 @@ def register_handlers(app):
         CallbackQueryHandler(
             my_locations_page,
             pattern=r"^locs_page:(?:\d+|noop)$",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            status_dashboard,
+            pattern="^status_dashboard$",
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "status",
+            status_dashboard_command,
         )
     )
 

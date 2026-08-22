@@ -11,8 +11,8 @@ from db.models import OutageCache
 def build_region_key(province_code: str, county_code: str, city_fa: str, district_fa: str) -> str:
     """
     کلید یکتای منطقه، مستقل از کاربر.
-    هرمس ایجنت هم باید دقیقاً همین فرمت رو برای نوشتن تو outage_cache استفاده کنه
-    (یا بهتر، این مقدار رو مستقیم از ستون region_key جدول locations بخونه).
+    اسکریپت fetch_outages_postgres.py (GitHub Actions) باید دقیقاً همین فرمت رو
+    برای نوشتن تو outage_cache استفاده کنه.
     """
     norm_city = _normalize(city_fa)
     norm_district = _normalize(district_fa)
@@ -28,7 +28,7 @@ def _normalize(text: str) -> str:
 async def get_cached_outage(
     session: AsyncSession, region_key: str, date: dt.date
 ) -> OutageCache | None:
-    """فقط از کش می‌خونه؛ نوشتن توی این جدول کار هرمس ایجنته، نه این ربات"""
+    """فقط از کش می‌خونه؛ نوشتن توی این جدول کار اسکریپت fetch هست، نه این ربات"""
     return await session.scalar(
         select(OutageCache).where(
             OutageCache.region_key == region_key, OutageCache.date == date
@@ -106,7 +106,7 @@ _OUTAGE_WORD_SIMILARITY_THRESHOLD = 0.3
 # word_similarity بهترین تطابق یه کلمه‌ی کوتاه رو داخل یه متن بلندتر پیدا می‌کنه؛
 # دقیقاً همون چیزی که لازم داریم چون کلمه‌ی کاربر کوتاهه ولی note آدرس کامل و بلنده.
 # translate هم کاراکترهای عربی (ي، ك) رو به معادل فارسی‌شون (ی، ک) یکسان می‌کنه،
-# چون داده‌ی خام هرمس این دو رسم‌الخط رو قاطی داره.
+# چون داده‌ی خام سایت این دو رسم‌الخط رو قاطی داره.
 _SIMILAR_OUTAGES_QUERY = sql_text(
     """
     SELECT region_key, note, start_time, end_time, score FROM (

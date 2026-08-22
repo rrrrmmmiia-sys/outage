@@ -51,12 +51,36 @@ async def notification_worker(bot):
 
     notify_minutes = config.NOTIFY_MINUTES_BEFORE
 
-    window_low = now + dt.timedelta(
-        minutes=notify_minutes - 1
-    )
-    window_high = now + dt.timedelta(
-        minutes=notify_minutes + 1
-    )
+    # دو نوع هشدار: «یک ساعت قبل» (اگه روشنه) و «۱۰ دقیقه قبل».
+    # هر کدوم پنجره‌ی ±۱ دقیقه‌ای دور زمان هدف خودش رو داره؛
+    # ممکنه هر دو همزمان برن (قطعی‌ای که دقیقاً ۶۰ دقیقه مونده).
+    alert_kinds = [
+        (
+            "ten_min",
+            notify_minutes,
+            f"⚠️ تا {notify_minutes} دقیقه‌ی دیگه قطعی برق شروع میشه.",
+        ),
+    ]
+    hour_before = config.NOTIFY_HOUR_BEFORE_MINUTES
+    if hour_before > 0:
+        alert_kinds.insert(
+            0,
+            (
+                "hour",
+                hour_before,
+                f"🔌 حدود {hour_before // 60} ساعت دیگه قطعی برق شروع میشه.",
+            ),
+        )
+
+    windows = [
+        (
+            kind,
+            message_head,
+            now + dt.timedelta(minutes=minutes - 1),
+            now + dt.timedelta(minutes=minutes + 1),
+        )
+        for kind, minutes, message_head in alert_kinds
+    ]
 
     # ردیف‌های امروز و فردا رو با هم می‌خونیم تا قطعی‌های بعد از نیمه‌شب
     # (که تو دیتابیس با date=فردا ثبت شدن) هم پوشش داده بشن
@@ -67,7 +91,7 @@ async def notification_worker(bot):
     async with get_session() as session:
 
         # ---------------------------------------------------------
-        # 1. قطعی‌هایی که زمان شروعشان در بازه هشدار است
+        # 1. همه‌ی قطعی‌های امروز/فردا (پنجره‌ها روی این‌ها چک میشن)
         # ---------------------------------------------------------
 
         cache_result = await session.execute(
@@ -80,20 +104,28 @@ async def notification_worker(bot):
 
         all_caches = cache_result.scalars().all()
 
-        due_caches = [
-            c
-            for c in all_caches
-            if window_low
-            <= dt.datetime.combine(
-                c.date, c.start_time, tzinfo=TZ
-            )
-            <= window_high
-        ]
+        # نگاشت region_key -> لیست (قطعی سررسیده، انواع هشدارِ خورده).
+        # ⚠️ هر قطعی فقط برای kind ای هشدار می‌گیره که واقعاً پنجره‌اش رو
+        # خورده — نه همه‌ی انواع.
+        due_by_region: dict[str, list[tuple[OutageCache, list[str]]]] = defaultdict(list)
 
-        if not due_caches:
+        for c in all_caches:
+
+            hit_kinds = [
+                kind
+                for kind, _head, low, high in windows
+                if low <= dt.datetime.combine(c.date, c.start_time, tzinfo=TZ) <= high
+            ]
+
+            if hit_kinds:
+                due_by_region[c.region_key].append((c, hit_kinds))
+
+        if not due_by_region:
             return
 
-        due_keys = {c.region_key for c in due_caches}
+        due_caches = [
+            c for pairs in due_by_region.values() for c, _kinds in pairs
+        ]
 
         logger.info(
             "Notification worker: %s outage(s) due around %s",
@@ -114,14 +146,62 @@ async def notification_worker(bot):
         if not locations:
             return
 
-        # نگاشت region_key -> قطعی سررسیده (برای تطبیق دقیق سریع)
+        # نگاشت region_key -> اولین قطعی سررسیده (برای فالبکِ زیررشته)
         cache_by_region = {
-            c.region_key: c for c in due_caches
+            k: v[0][0] for k, v in due_by_region.items()
+        }
+
+        # هشدارهایی که همین امروز قبلاً رفتن (همه رو یکجا می‌خونیم)
+        loc_ids = [loc.id for loc in locations]
+
+        sent_result = await session.execute(
+            select(NotificationSent).where(
+                NotificationSent.location_id.in_(loc_ids),
+                NotificationSent.date.in_(candidate_dates),
+            )
+        )
+
+        sent_rows = sent_result.scalars().all()
+
+        sent_keys = {
+            (s.location_id, s.date, s.start_time, s.kind)
+            for s in sent_rows
         }
 
         # ---------------------------------------------------------
-        # 3. برای هر مکان کاربر، قطعی مناسب را پیدا می‌کنیم
+        # 3. برای هر مکان کاربر، قطعی‌های سررسیده را پیدا می‌کنیم
+        #
+        # تطبیق: اول دقیق روی region_key؛ اگه نشد فالبکِ زیررشته —
+        # district کاربر باید واقعاً داخل note یکی از همون چند قطعیِ
+        # سررسیده باشه (کاربر ممکنه متن آزاد تایپ کرده باشه).
         # ---------------------------------------------------------
+
+        def _match_outages(location) -> list[tuple[OutageCache, list[str]]]:
+            exact = due_by_region.get(location.region_key)
+            if exact:
+                return exact
+
+            keyword = (location.district_fa or "").strip()
+            if not keyword:
+                return []
+
+            keyword = keyword.replace("ي", "ی").replace("ك", "ک")
+
+            matched = []
+            seen_ids = set()
+            for candidate in due_caches:
+                if id(candidate) in seen_ids:
+                    continue
+                note = (candidate.note or "").replace("ي", "ی").replace("ك", "ک")
+                if keyword in note:
+                    # فالبک: kind های این قطعی رو از نگاشت اصلی پیدا کن
+                    kinds = next(
+                        (ks for c, ks in due_by_region.get(candidate.region_key, []) if c is candidate),
+                        [],
+                    )
+                    matched.append((candidate, kinds))
+                    seen_ids.add(id(candidate))
+            return matched
 
         for location in locations:
 
@@ -137,139 +217,87 @@ async def notification_worker(bot):
                 )
                 continue
 
-            # -----------------------------------------------------
-            # 4. جلوگیری از ارسال چندباره برای یک مکان در همان روز
-            # -----------------------------------------------------
+            matched_outages = _match_outages(location)
 
-            already_sent = await session.scalar(
-                select(NotificationSent).where(
-                    NotificationSent.location_id == location.id,
-                    NotificationSent.date == today,
-                )
-            )
-
-            if already_sent:
+            if not matched_outages:
                 continue
 
             # -----------------------------------------------------
-            # 5. پیدا کردن قطعی سررسیده‌ی این مکان
-            #
-            # اول تطبیق دقیق region_key (سریع و بدون ابهام).
-            # اگه پیدا نشد، فالبک: district کاربر باید واقعاً داخل
-            # note یکی از همون چند قطعیِ سررسیده باشه — چون ممکنه
-            # کاربر متن آزاد تایپ کرده باشه و region_key اش با
-            # کلید رکورد خام هرمس یکی نباشه.
+            # 4. برای هر (قطعی، نوع هشدار): اگه قبلاً نرفته، بفرست
+            #    چند قطعی در روز → چند ردیف مستقل در notifications_sent
             # -----------------------------------------------------
 
-            if not (location.district_fa or "").strip():
-                logger.warning(
-                    "Location %s has empty district_fa",
-                    location.id,
-                )
-                continue
+            for outage, hit_kinds in matched_outages:
 
-            cache = cache_by_region.get(
-                location.region_key
-            )
+                for kind in hit_kinds:
 
-            if cache is None:
-
-                keyword = (
-                    location.district_fa
-                    .replace("ي", "ی")
-                    .replace("ك", "ک")
-                    .strip()
-                )
-
-                for candidate in due_caches:
-
-                    note = (
-                        candidate.note or ""
-                    ).replace("ي", "ی").replace("ك", "ک")
-
-                    if keyword in note:
-
-                        cache = candidate
-
-                        break
-
-            if cache is None:
-                continue
-
-            # -----------------------------------------------------
-            # 6. قطعی پیدا شد
-            # -----------------------------------------------------
-
-            logger.info(
-                "MATCH FOUND: location_id=%s | user=%s | "
-                "city=%s | district=%s | outage_note=%s",
-                location.id,
-                user.telegram_id,
-                location.city_fa,
-                location.district_fa,
-                cache.note,
-            )
-
-            # -----------------------------------------------------
-            # 7. ساخت پیام
-            # -----------------------------------------------------
-
-            message = (
-                f"⚠️ تا {notify_minutes} دقیقه‌ی دیگه "
-                f"قطعی برق شروع میشه.\n"
-                f"مکان: {location.city_fa} - "
-                f"{location.district_fa}\n"
-                f"ساعت شروع: "
-                f"{cache.start_time.strftime('%H:%M')}\n"
-            )
-
-            if cache.end_time:
-                message += (
-                    f"ساعت پایان: "
-                    f"{cache.end_time.strftime('%H:%M')}\n"
-                )
-
-            # -----------------------------------------------------
-            # 8. ارسال پیام تلگرام
-            # -----------------------------------------------------
-
-            try:
-
-                await bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=message,
-                )
-
-                # -------------------------------------------------
-                # 9. ثبت اینکه هشدار این مکان امروز ارسال شده
-                # -------------------------------------------------
-
-                session.add(
-                    NotificationSent(
-                        location_id=location.id,
-                        date=today,
+                    head = next(
+                        h for k, _m, h in alert_kinds if k == kind
                     )
-                )
 
-                await session.commit()
+                    dedup_key = (
+                        location.id,
+                        outage.date,
+                        outage.start_time,
+                        kind,
+                    )
 
-                logger.info(
-                    "Notification sent successfully: "
-                    "location_id=%s user=%s",
-                    location.id,
-                    user.telegram_id,
-                )
+                    if dedup_key in sent_keys:
+                        continue
 
-            except Exception as exc:
+                    message = (
+                        f"{head}\n"
+                        f"مکان: {location.city_fa} - "
+                        f"{location.district_fa}\n"
+                        f"ساعت شروع: "
+                        f"{outage.start_time.strftime('%H:%M')}\n"
+                    )
 
-                await session.rollback()
+                    if outage.end_time:
+                        message += (
+                            f"ساعت پایان: "
+                            f"{outage.end_time.strftime('%H:%M')}\n"
+                        )
 
-                logger.error(
-                    "خطا در ارسال پیام به کاربر %s: %s",
-                    user.telegram_id,
-                    exc,
-                    exc_info=True,
-                )
+                    try:
+
+                        await bot.send_message(
+                            chat_id=user.telegram_id,
+                            text=message,
+                        )
+
+                        session.add(
+                            NotificationSent(
+                                location_id=location.id,
+                                date=outage.date,
+                                start_time=outage.start_time,
+                                kind=kind,
+                            )
+                        )
+
+                        await session.commit()
+
+                        sent_keys.add(dedup_key)
+
+                        logger.info(
+                            "Notification sent (%s): "
+                            "location_id=%s user=%s start=%s",
+                            kind,
+                            location.id,
+                            user.telegram_id,
+                            outage.start_time.strftime("%H:%M"),
+                        )
+
+                    except Exception as exc:
+
+                        await session.rollback()
+
+                        logger.error(
+                            "خطا در ارسال پیام به کاربر %s: %s",
+                            user.telegram_id,
+                            exc,
+                            exc_info=True,
+                        )
 
 
 def setup_scheduler(bot) -> AsyncIOScheduler:
@@ -277,7 +305,7 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     راه‌اندازی Scheduler.
 
     notification_worker هر یک دقیقه اجرا می‌شود.
-    nightly_summary_worker هم هر شب بعد از نوشتن دیتای هرمس اجرا می‌شود.
+    nightly_summary_worker هم هر شب اجرا می‌شود (بعد از جاب ۰۰:۳۰ گیت‌هاب که دیتا رو به‌روز می‌کنه).
     """
 
     scheduler = AsyncIOScheduler(
@@ -321,7 +349,7 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
 
 async def nightly_summary_worker(bot):
     """
-    هر شب (بعد از اینکه هرمس دیتای فردا رو نوشت) برای کاربرهایی که
+    هر شب برای کاربرهایی که
     خلاصه‌ی شبانه براشون روشنه، ساعت قطعی فردای همه‌ی مکان‌هاشون رو
     در یک پیام می‌فرسته.
     """
@@ -360,16 +388,21 @@ async def nightly_summary_worker(bot):
         )
 
         cache_result = await session.execute(
-            select(OutageCache).where(
+            select(OutageCache)
+            .where(
                 OutageCache.region_key.in_(region_keys),
                 OutageCache.date == tomorrow,
+                OutageCache.found == True,  # noqa: E712
+                OutageCache.start_time.is_not(None),
             )
+            .order_by(OutageCache.start_time)
         )
 
-        cache_by_region = {
-            c.region_key: c
-            for c in cache_result.scalars().all()
-        }
+        # چند قطعی در روز → برای هر region_key لیستی از بازه‌ها
+        caches_by_region: dict[str, list[OutageCache]] = defaultdict(list)
+
+        for c in cache_result.scalars().all():
+            caches_by_region[c.region_key].append(c)
 
         # جلوگیری از ارسال تکراری اگه جاب دو بار تو یه شب اجرا بشه
         sent_result = await session.execute(
@@ -405,38 +438,41 @@ async def nightly_summary_worker(bot):
 
             for loc in user_locs:
 
-                cache = cache_by_region.get(
-                    loc.region_key
+                outages = caches_by_region.get(
+                    loc.region_key,
+                    [],
                 )
 
-                if (
-                    cache
-                    and cache.found
-                    and cache.start_time
-                ):
-
-                    time_range = (
-                        cache.start_time.strftime("%H:%M")
-                    )
-
-                    if cache.end_time:
-                        time_range += (
-                            " تا "
-                            + cache.end_time.strftime("%H:%M")
-                        )
-
-                    lines.append(
-                        f"⚡ {loc.city_fa} - "
-                        f"{loc.district_fa}: {time_range}"
-                    )
-
-                else:
+                if not outages:
 
                     lines.append(
                         f"▫️ {loc.city_fa} - "
                         f"{loc.district_fa}: "
                         "قطعی برنامه‌ریزی‌شده‌ای پیدا نشد"
                     )
+
+                    continue
+
+                # همه‌ی بازه‌های قطعی اون روز، پشت هم تو یه خط
+                ranges = []
+
+                for outage in outages:
+
+                    rng = outage.start_time.strftime("%H:%M")
+
+                    if outage.end_time:
+                        rng += (
+                            " تا "
+                            + outage.end_time.strftime("%H:%M")
+                        )
+
+                    ranges.append(rng)
+
+                lines.append(
+                    f"⚡ {loc.city_fa} - "
+                    f"{loc.district_fa}: "
+                    f"{' و '.join(ranges)}"
+                )
 
             try:
 

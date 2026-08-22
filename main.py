@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from telegram import BotCommand
 from telegram.ext import ApplicationBuilder
 
 import config
@@ -15,9 +16,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# منوی دستورات که کنار دکمه‌ی سنجاق/ورودی پیام نمایش داده میشه
+BOT_COMMANDS = [
+    BotCommand("start", "شروع / منوی اصلی"),
+    BotCommand("status", "وضعیت قطعی امروز همه‌ی مکان‌هات"),
+    BotCommand("add", "افزودن مکان جدید"),
+    BotCommand("locations", "لیست مکان‌های ثبت‌شده"),
+    BotCommand("help", "راهنمای استفاده از ربات"),
+]
+
+
 async def _post_init(application):
     await init_db()
     logger.info("دیتابیس آماده شد")
+    await application.bot.set_my_commands(BOT_COMMANDS)
+    logger.info("منوی دستورات ثبت شد")
     setup_scheduler(application.bot)
     logger.info("زمان‌بند فعال شد")
 

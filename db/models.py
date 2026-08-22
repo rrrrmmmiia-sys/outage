@@ -77,14 +77,16 @@ class Location(Base):
 
 class OutageCache(Base):
     """
-    نتیجه‌ی جست‌وجوی هرمس ایجنت برای یک منطقه در یک روز مشخص.
-    قبل از هر جست‌وجوی جدید (چه توسط هرمس، چه در آینده)، این جدول چک میشه
-    تا کوئری تکراری برای یک منطقه‌ی از قبل جست‌وجوشده زده نشه.
+    نتیجه‌ی جست‌وجوی قطعی برای یک منطقه در یک روز مشخص.
+    داده‌ی این جدول توسط GitHub Actions هر شب از سایت توزیع برق
+    به‌روزرسانی میشه؛ ربات فقط می‌خونه.
     """
 
     __tablename__ = "outage_cache"
     __table_args__ = (
-        UniqueConstraint("region_key", "date", name="uq_region_date"),
+        # ⚠️ یکتایی روی (region_key, date, start_time) است نه (region_key, date) —
+        # چون ممکنه همون منطقه در یک روز دو بار (صبح و عصر) قطعی داشته باشه
+        UniqueConstraint("region_key", "date", "start_time", name="uq_region_date_start"),
         Index(
             "ix_outage_cache_note_trgm",
             "note",
@@ -108,19 +110,36 @@ class OutageCache(Base):
 
 
 class NotificationSent(Base):
-    """جلوگیری از ارسال تکراری هشدار برای یک مکان در یک روز مشخص"""
+    """
+    جلوگیری از ارسال تکراری هشدار برای یک مکان.
+
+    ⚠️ یکتایی روی (location_id, date, start_time, kind) است نه فقط تاریخ —
+    چون ممکنه در یک روز چند قطعی جدا باشه و برای هرکدوم باید جداگانه
+    هشدار بره. kind بین «۶۰ دقیقه قبل» و «۱۰ دقیقه قبل» فرق می‌ذاره.
+    """
 
     __tablename__ = "notifications_sent"
     __table_args__ = (
-        UniqueConstraint("location_id", "date", name="uq_location_date"),
+        UniqueConstraint(
+            "location_id",
+            "date",
+            "start_time",
+            "kind",
+            name="uq_location_date_start_kind",
+        ),
+        Index("ix_notifications_loc_date", "location_id", "date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     location_id: Mapped[int] = mapped_column(
-    ForeignKey("locations.id", ondelete="CASCADE"),
-    index=True,
-)
+        ForeignKey("locations.id", ondelete="CASCADE"),
+        index=True,
+    )
     date: Mapped[dt.date] = mapped_column(Date, index=True)
+    # ساعت شروع همون قطعی که براش هشدار رفت (نه زمانِ ارسال)
+    start_time: Mapped[dt.time] = mapped_column(Time)
+    # 'hour' = هشدار یک ساعت قبل، 'ten_min' = هشدار ده دقیقه قبل
+    kind: Mapped[str] = mapped_column(String(16))
     sent_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )
